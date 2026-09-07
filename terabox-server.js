@@ -203,24 +203,44 @@ async function resolveShare(url) {
                 shortUrl
             );
 
-            const info =
-                await tb.shortUrlInfo(
-                    shortUrl
-                );
+const info =
+    await tb.shortUrlInfo(
+        shortUrl
+    );
 
-            console.log(
-                "shortUrlInfo completed."
-            );
+console.log(
+    "shortUrlInfo completed."
+);
 
-            const files =
-                normalizeFiles(info)
-                    .filter(
-                        file =>
-                            String(file.isdir) !== "1"
-                    )
-                    .map(
-                        formatFile
-                    );
+console.log(
+    "shortUrlInfo errno:",
+    info?.errno
+);
+
+console.log(
+    "shortUrlInfo fcount:",
+    info?.fcount
+);
+
+const rawFiles =
+    Array.isArray(info?.list)
+        ? info.list
+        : [];
+
+console.log(
+    "Files directly in info.list:",
+    rawFiles.length
+);
+
+const files =
+    rawFiles
+        .filter(
+            file =>
+                String(file.isdir) !== "1"
+        )
+        .map(
+            formatFile
+        );
 
             if (files.length > 0) {
                 console.log(
