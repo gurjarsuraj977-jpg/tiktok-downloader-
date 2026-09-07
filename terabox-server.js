@@ -1,18 +1,27 @@
+```js
 const express = require("express");
 const { TeraBoxApp } = require("@cfbeg/terabox-api");
 
 const app = express();
+
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-function extractShortUrl(input) {
+
+// =======================================================
+// TeraBox URL HELPERS
+// =======================================================
+
+function extractShareCode(input) {
     const value = String(input || "").trim();
 
-    let match = value.match(/[?&]surl=([A-Za-z0-9_-]+)/i);
+    let match =
+        value.match(/[?&]surl=([A-Za-z0-9_-]+)/i);
 
     if (!match) {
-        match = value.match(/\/s\/([A-Za-z0-9_-]+)/i);
+        match =
+            value.match(/\/s\/([A-Za-z0-9_-]+)/i);
     }
 
     if (!match) {
@@ -21,15 +30,41 @@ function extractShortUrl(input) {
         );
     }
 
-    return match[1].startsWith("1")
-        ? match[1].slice(1)
-        : match[1];
+    return match[1];
 }
+
+
+function buildShortUrlCandidates(code) {
+    const clean =
+        String(code || "").trim();
+
+    const withoutLeadingOne =
+        clean.startsWith("1")
+            ? clean.slice(1)
+            : clean;
+
+    const candidates = [
+        "s/" + clean,
+        "s/1" + withoutLeadingOne,
+        clean,
+        "1" + withoutLeadingOne,
+        withoutLeadingOne
+    ];
+
+    return [
+        ...new Set(
+            candidates.filter(Boolean)
+        )
+    ];
+}
+
 
 function isTeraBoxUrl(input) {
     try {
         const hostname =
-            new URL(input).hostname.toLowerCase();
+            new URL(input)
+                .hostname
+                .toLowerCase();
 
         return [
             "terabox.com",
@@ -43,10 +78,121 @@ function isTeraBoxUrl(input) {
             "1024tera.com",
             "www.1024tera.com"
         ].includes(hostname);
+
     } catch {
         return false;
     }
 }
+
+
+// =======================================================
+// FILE EXTRACTION
+// =======================================================
+
+function looksLikeFileObject(value) {
+    if (!value || typeof value !== "object") {
+        return false;
+    }
+
+    return Boolean(
+        value.fs_id !== undefined ||
+        value.server_filename ||
+        value.filename ||
+        value.path
+    );
+}
+
+
+function collectFileObjects(
+    value,
+    result,
+    seen,
+    depth = 0
+) {
+    if (
+        value === null ||
+        value === undefined ||
+        depth > 8
+    ) {
+        return;
+    }
+
+
+    if (Array.isArray(value)) {
+
+        for (const item of value) {
+
+            if (result.length >= 100) {
+                return;
+            }
+
+            collectFileObjects(
+                item,
+                result,
+                seen,
+                depth + 1
+            );
+        }
+
+        return;
+    }
+
+
+    if (
+        typeof value !== "object"
+    ) {
+        return;
+    }
+
+
+    if (
+        looksLikeFileObject(value) &&
+        value.fs_id !== undefined
+    ) {
+
+        const id =
+            String(value.fs_id);
+
+        if (!seen.has(id)) {
+
+            seen.add(id);
+
+            result.push(value);
+        }
+    }
+
+
+    for (
+        const key of Object.keys(value)
+    ) {
+
+        if (result.length >= 100) {
+            return;
+        }
+
+        collectFileObjects(
+            value[key],
+            result,
+            seen,
+            depth + 1
+        );
+    }
+}
+
+
+function extractFilesFromResponse(response) {
+    const files = [];
+    const seen = new Set();
+
+    collectFileObjects(
+        response,
+        files,
+        seen
+    );
+
+    return files;
+}
+
 
 function formatFile(file) {
     return {
@@ -68,6 +214,10 @@ function formatFile(file) {
         isdir:
             String(file.isdir || "0"),
 
+        md5:
+            file.md5 ||
+            "",
+
         thumbnail:
             file.thumbs?.url3 ||
             file.thumbs?.url2 ||
@@ -77,11 +227,18 @@ function formatFile(file) {
     };
 }
 
+
+// =======================================================
+// TeraBox CLIENT
+// =======================================================
+
 async function createClient() {
+
     const ndus =
         String(
             process.env.TERABOX_NDUS || ""
         ).trim();
+
 
     if (!ndus) {
         throw new Error(
@@ -89,197 +246,374 @@ async function createClient() {
         );
     }
 
+
     const tb =
         new TeraBoxApp(
             ndus,
             "ndus"
         );
 
+
     const login =
         await tb.checkLogin();
+
 
     if (
         !login ||
         Number(login.errno) !== 0
     ) {
+
         throw new Error(
             "TeraBox session is invalid or expired."
         );
     }
 
+
     return tb;
 }
 
-async function resolveSharedLink(url) {
-    const tb =
-        await createClient();
 
-    const value = String(url || "").trim();
+// =======================================================
+// SHARED LINK RESOLUTION
+// =======================================================
 
-    let match =
-        value.match(/[?&]surl=([A-Za-z0-9_-]+)/i);
+async function getSharedFiles(
+    tb,
+    inputUrl
+) {
 
-    if (!match) {
-        match =
-            value.match(/\/s\/([A-Za-z0-9_-]+)/i);
-    }
-
-    if (!match) {
-        throw new Error(
-            "Could not extract the TeraBox share code."
+    const code =
+        extractShareCode(
+            inputUrl
         );
-    }
 
-    const shortUrl =
-        "s/" + match[1];
 
-    console.log(
-        "Resolving TeraBox share..."
-    );
+    const candidates =
+        buildShortUrlCandidates(
+            code
+        );
 
-    const info =
-        await tb.shortUrlInfo(
+
+    let lastError = null;
+
+
+    for (
+        const shortUrl of candidates
+    ) {
+
+        console.log(
+            "Trying share format:",
             shortUrl
         );
 
-    console.log(
-        "Share info received."
-    );
 
-const listed =
-    await tb.shortUrlList(
-        shortUrl,
-        "",
-        1
-    );
+        try {
 
-console.log(
-    "Shared file list received."
-);
+            const info =
+                await tb.shortUrlInfo(
+                    shortUrl
+                );
 
-const rawFiles =
-    Array.isArray(listed?.list)
-        ? listed.list
-        : Array.isArray(listed?.data?.list)
-            ? listed.data.list
-            : Array.isArray(info?.list)
-                ? info.list
-                : Array.isArray(info?.data?.list)
-                    ? info.data.list
-                    : [];
 
-console.log(
-    "Shared files detected:",
-    rawFiles.length
-);
-    const files =
-        rawFiles
-            .filter(
-                file =>
-                    String(file.isdir) !== "1"
-            )
-            .map(formatFile);
+            const infoFiles =
+                extractFilesFromResponse(
+                    info
+                );
 
-    if (!files.length) {
-        throw new Error(
-            "No files were found in this TeraBox share."
-        );
+
+            console.log(
+                "shortUrlInfo files:",
+                infoFiles.length
+            );
+
+
+            if (
+                infoFiles.length > 0
+            ) {
+
+                return {
+                    shortUrl,
+                    info,
+                    files:
+                        infoFiles
+                };
+
+            }
+
+
+            /*
+            If shortUrlInfo gives metadata but
+            no file entries, try shortUrlList.
+            */
+
+            try {
+
+                const listed =
+                    await tb.shortUrlList(
+                        shortUrl,
+                        "",
+                        1
+                    );
+
+
+                const listedFiles =
+                    extractFilesFromResponse(
+                        listed
+                    );
+
+
+                console.log(
+                    "shortUrlList files:",
+                    listedFiles.length
+                );
+
+
+                if (
+                    listedFiles.length > 0
+                ) {
+
+                    return {
+                        shortUrl,
+                        info,
+                        listed,
+                        files:
+                            listedFiles
+                    };
+
+                }
+
+            } catch (listError) {
+
+                lastError =
+                    listError;
+
+                console.log(
+                    "shortUrlList failed:",
+                    listError.message
+                );
+
+            }
+
+        } catch (error) {
+
+            lastError =
+                error;
+
+            console.log(
+                "Share format failed:",
+                shortUrl,
+                error.message
+            );
+
+        }
+
     }
 
-    const home =
-        await tb.getHomeInfo();
 
-    const signb =
-        home?.data?.signb ||
-        home?.signb ||
-        "";
+    if (lastError) {
 
-    if (!signb) {
         throw new Error(
-            "TeraBox did not return the download signature."
+            "TeraBox could not resolve this share: " +
+            lastError.message
         );
+
     }
+
+
+    throw new Error(
+        "The TeraBox share returned no files."
+    );
+}
+
+
+// =======================================================
+// DOWNLOAD LINK GENERATION
+// =======================================================
+
+function extractDownloadItems(
+    downloadResult
+) {
+
+    if (
+        Array.isArray(
+            downloadResult?.dlink
+        )
+    ) {
+        return downloadResult.dlink;
+    }
+
+
+    if (
+        Array.isArray(
+            downloadResult?.data?.list
+        )
+    ) {
+        return downloadResult.data.list;
+    }
+
+
+    if (
+        Array.isArray(
+            downloadResult?.list
+        )
+    ) {
+        return downloadResult.list;
+    }
+
+
+    return [];
+}
+
+
+async function createDownloadLinks(
+    tb,
+    files
+) {
 
     console.log(
         "Generating download links..."
     );
 
+
     const fsIds =
         files
             .map(
                 file =>
-                    file.fs_id
+                    Number(
+                        file.fs_id
+                    )
             )
-            .filter(Boolean)
-            .map(
-                value =>
-                    Number(value)
+            .filter(
+                Number.isFinite
             );
+
 
     if (!fsIds.length) {
+
         throw new Error(
-            "No valid file IDs were returned."
+            "No valid TeraBox file IDs were returned."
         );
+
     }
 
-    const downloadResult =
-        await tb.download(
-            fsIds,
-            signb
-        );
 
-    const downloadItems =
-        Array.isArray(
-            downloadResult?.dlink
-        )
-            ? downloadResult.dlink
-            : (
-                Array.isArray(
-                    downloadResult?.data?.list
-                )
-                    ? downloadResult.data.list
-                    : (
-                        Array.isArray(
-                            downloadResult?.list
-                        )
-                            ? downloadResult.list
-                            : []
-                    )
+    let downloadResult;
+
+
+    /*
+    The current TeraBox API documents download(fs_ids)
+    as the download-link method. Some builds accept the
+    fs_ids array alone; our working test confirmed that
+    behavior on this Render service.
+    */
+
+    try {
+
+        downloadResult =
+            await tb.download(
+                fsIds
             );
 
-    const linkMap =
+    } catch (firstError) {
+
+        console.log(
+            "download(fsIds) failed:",
+            firstError.message
+        );
+
+
+        /*
+        Fallback for clients that require signb.
+        */
+
+        try {
+
+            const home =
+                await tb.getHomeInfo();
+
+
+            const signb =
+                home?.data?.signb ||
+                home?.signb ||
+                "";
+
+
+            if (!signb) {
+                throw firstError;
+            }
+
+
+            downloadResult =
+                await tb.download(
+                    fsIds,
+                    signb
+                );
+
+        } catch (secondError) {
+
+            throw new Error(
+                "TeraBox download-link request failed: " +
+                secondError.message
+            );
+
+        }
+
+    }
+
+
+    const items =
+        extractDownloadItems(
+            downloadResult
+        );
+
+
+    console.log(
+        "Download links returned:",
+        items.length
+    );
+
+
+    const map =
         new Map();
 
+
     for (
-        const item of downloadItems
+        const item of items
     ) {
+
         if (
             item &&
             item.fs_id !== undefined &&
             item.dlink
         ) {
-            linkMap.set(
-                String(item.fs_id),
-                item.dlink
+
+            map.set(
+                String(
+                    item.fs_id
+                ),
+                String(
+                    item.dlink
+                )
             );
+
         }
+
     }
 
-    const output =
-        files.map(
-            file => ({
-                ...file,
 
-                downloadUrl:
-                    linkMap.get(
-                        String(file.fs_id)
-                    ) || ""
-            })
-        );
+    return files.map(
+        file => ({
+            ...file,
 
-    return {
-        files: output
-    };
+            downloadUrl:
+                map.get(
+                    String(
+                        file.fs_id
+                    )
+                ) || ""
+        })
+    );
+
 }
 
 
@@ -290,6 +624,7 @@ console.log(
 app.get(
     "/api/health",
     (req, res) => {
+
         res.json({
             ok: true,
             service:
@@ -297,12 +632,13 @@ app.get(
             status:
                 "running"
         });
+
     }
 );
 
 
 // =======================================================
-// RESOLVE
+// RESOLVE API
 // =======================================================
 
 app.post(
@@ -316,6 +652,7 @@ app.post(
                     req.body?.url || ""
                 ).trim();
 
+
             if (!url) {
 
                 return res.status(400).json({
@@ -325,6 +662,7 @@ app.post(
                 });
 
             }
+
 
             if (!isTeraBoxUrl(url)) {
 
@@ -336,16 +674,88 @@ app.post(
 
             }
 
-            const result =
-                await resolveSharedLink(
+
+            const tb =
+                await createClient();
+
+
+            console.log(
+                "Resolving TeraBox share..."
+            );
+
+
+            const shared =
+                await getSharedFiles(
+                    tb,
                     url
                 );
 
+
+            console.log(
+                "Shared files found:",
+                shared.files.length
+            );
+
+
+            const files =
+                shared.files
+                    .filter(
+                        file =>
+                            String(
+                                file.isdir
+                            ) !== "1"
+                    )
+                    .map(
+                        formatFile
+                    );
+
+
+            if (!files.length) {
+
+                throw new Error(
+                    "The share contains no downloadable files."
+                );
+
+            }
+
+
+            const linkedFiles =
+                await createDownloadLinks(
+                    tb,
+                    files
+                );
+
+
+            const readyCount =
+                linkedFiles.filter(
+                    file =>
+                        Boolean(
+                            file.downloadUrl
+                        )
+                ).length;
+
+
+            console.log(
+                "Ready download links:",
+                readyCount
+            );
+
+
             return res.json({
+
                 ok: true,
+
                 files:
-                    result.files
+                    linkedFiles,
+
+                count:
+                    linkedFiles.length,
+
+                ready:
+                    readyCount
+
             });
+
 
         } catch (error) {
 
@@ -354,11 +764,15 @@ app.post(
                 error.message
             );
 
+
             return res.status(500).json({
+
                 ok: false,
+
                 error:
                     error.message ||
                     "Could not resolve TeraBox link."
+
             });
 
         }
@@ -432,12 +846,12 @@ body {
 
 .container {
     width: 100%;
-    max-width: 760px;
+    max-width: 780px;
 }
 
 .card {
     background:
-        rgba(15, 23, 42, 0.94);
+        rgba(15, 23, 42, 0.95);
 
     border:
         1px solid
@@ -460,8 +874,8 @@ body {
         0 auto 18px;
 
     display: flex;
-    justify-content: center;
     align-items: center;
+    justify-content: center;
 
     border-radius: 20px;
 
@@ -558,10 +972,16 @@ button {
     white-space: nowrap;
 }
 
+button:hover {
+    transform: translateY(-1px);
+}
+
 button:disabled {
     opacity: .55;
 
     cursor: not-allowed;
+
+    transform: none;
 }
 
 .status {
@@ -615,8 +1035,7 @@ button:disabled {
 
     border-radius: 15px;
 
-    background:
-        #111827;
+    background: #111827;
 
     border:
         1px solid
@@ -632,6 +1051,8 @@ button:disabled {
     border-radius: 9px;
 
     background: #020617;
+
+    flex-shrink: 0;
 }
 
 .info {
@@ -681,6 +1102,12 @@ button:disabled {
     background: #334155;
 }
 
+.missing {
+    color: #fbbf24;
+
+    font-size: 12px;
+}
+
 .note {
     margin-top: 20px;
 
@@ -715,6 +1142,10 @@ button:disabled {
         flex-wrap: wrap;
     }
 
+    .info {
+        min-width: calc(100% - 95px);
+    }
+
     .download {
         width: 100%;
 
@@ -742,7 +1173,7 @@ TeraBox Downloader
 </h1>
 
 <p class="subtitle">
-Download files from your TeraBox share links.
+Paste a public TeraBox share link and get your files.
 </p>
 
 <div class="input-row">
@@ -823,9 +1254,11 @@ Personal-use downloader
         const n =
             Number(bytes) || 0;
 
+
         if (n < 1024) {
             return n + " B";
         }
+
 
         if (
             n <
@@ -837,6 +1270,7 @@ Personal-use downloader
             " KB";
         }
 
+
         if (
             n <
             1024 * 1024 * 1024
@@ -847,6 +1281,7 @@ Personal-use downloader
             ).toFixed(1) +
             " MB";
         }
+
 
         return (
             n /
@@ -878,6 +1313,7 @@ Personal-use downloader
 
         filesBox.innerHTML =
             "";
+
 
         files.forEach(
             function (file) {
@@ -932,7 +1368,8 @@ Personal-use downloader
                     "name";
 
                 name.textContent =
-                    file.filename;
+                    file.filename ||
+                    "TeraBox File";
 
 
                 const size =
@@ -991,6 +1428,23 @@ Personal-use downloader
                         link
                     );
 
+                } else {
+
+                    const missing =
+                        document.createElement(
+                            "div"
+                        );
+
+                    missing.className =
+                        "missing";
+
+                    missing.textContent =
+                        "Link unavailable";
+
+                    row.appendChild(
+                        missing
+                    );
+
                 }
 
 
@@ -1027,7 +1481,7 @@ Personal-use downloader
             true;
 
         button.textContent =
-            "Getting files...";
+            "Resolving...";
 
 
         filesBox.innerHTML =
@@ -1071,7 +1525,7 @@ Personal-use downloader
 
                 throw new Error(
                     data.error ||
-                    "Could not resolve the link."
+                    "Could not resolve the TeraBox link."
                 );
 
             }
@@ -1088,7 +1542,7 @@ Personal-use downloader
             if (!files.length) {
 
                 throw new Error(
-                    "No files were found."
+                    "No files were found in this share."
                 );
 
             }
@@ -1108,12 +1562,28 @@ Personal-use downloader
                 ).length;
 
 
-            showMessage(
-                ready +
-                " download link(s) ready.",
-                "success"
-            );
+            if (
+                ready ===
+                files.length
+            ) {
 
+                showMessage(
+                    ready +
+                    " download link(s) ready.",
+                    "success"
+                );
+
+            } else {
+
+                showMessage(
+                    ready +
+                    " of " +
+                    files.length +
+                    " download link(s) ready.",
+                    "error"
+                );
+
+            }
 
         } catch (error) {
 
@@ -1171,6 +1641,10 @@ Personal-use downloader
 );
 
 
+// =======================================================
+// START SERVER
+// =======================================================
+
 app.listen(
     PORT,
     "0.0.0.0",
@@ -1183,3 +1657,4 @@ app.listen(
 
     }
 );
+```
