@@ -7,30 +7,84 @@ const http = require("http");
 const { spawn } = require("child_process");
 
 const { download } = require("@satorufx/mediadownloader");
+
 const ffmpegPath = require("ffmpeg-static");
+const ffprobePath = require("ffprobe-static").path;
 
 const app = express();
 
 const PORT = process.env.PORT || 3000;
 
-const DOWNLOAD_DIR = path.join(__dirname, "downloads");
+const DOWNLOAD_DIR =
+    path.join(__dirname, "downloads");
 
-const MAX_FILE_SIZE = 200 * 1024 * 1024;
-const FILE_EXPIRY = 5 * 60 * 1000;
+/*
+    Maximum source/final file size:
+    200 MB
+*/
+const MAX_FILE_SIZE =
+    200 * 1024 * 1024;
 
-fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+/*
+    Temporary files expire after:
+    5 minutes
+*/
+const FILE_EXPIRY =
+    5 * 60 * 1000;
 
-app.use(express.json({ limit: "10kb" }));
-app.use(express.static(path.join(__dirname, "public")));
+/*
+    Maximum time allowed for downloading
+*/
+const DOWNLOAD_TIMEOUT =
+    120000;
+
+/*
+    Maximum time allowed for FFmpeg
+*/
+const FFMPEG_TIMEOUT =
+    180000;
 
 
-/* ================================
+/*
+    Make sure downloads directory exists
+*/
+fs.mkdirSync(
+    DOWNLOAD_DIR,
+    {
+        recursive: true
+    }
+);
+
+
+/*
+    Express setup
+*/
+app.use(
+    express.json({
+        limit: "10kb"
+    })
+);
+
+app.use(
+    express.static(
+        path.join(
+            __dirname,
+            "public"
+        )
+    )
+);
+
+
+/* =========================================================
    TIKTOK URL VALIDATION
-================================ */
+========================================================= */
 
 function isValidTikTokUrl(value) {
+
     try {
-        const url = new URL(value);
+
+        const url =
+            new URL(value);
 
         const allowedHosts = [
             "tiktok.com",
@@ -47,14 +101,16 @@ function isValidTikTokUrl(value) {
         );
 
     } catch {
+
         return false;
+
     }
 }
 
 
-/* ================================
-   JOB DIRECTORY
-================================ */
+/* =========================================================
+   CREATE JOB DIRECTORY
+========================================================= */
 
 function createJobDirectory() {
 
@@ -69,7 +125,9 @@ function createJobDirectory() {
 
     fs.mkdirSync(
         directory,
-        { recursive: true }
+        {
+            recursive: true
+        }
     );
 
     return {
@@ -79,9 +137,9 @@ function createJobDirectory() {
 }
 
 
-/* ================================
-   CLEANUP
-================================ */
+/* =========================================================
+   CLEANUP DIRECTORY
+========================================================= */
 
 function cleanupDirectory(directory) {
 
@@ -96,11 +154,14 @@ function cleanupDirectory(directory) {
 }
 
 
-/* ================================
-   DOWNLOAD ORIGINAL VIDEO
-================================ */
+/* =========================================================
+   DOWNLOAD FILE
+========================================================= */
 
-function downloadFile(url, destination) {
+function downloadFile(
+    url,
+    destination
+) {
 
     return new Promise(
         (resolve, reject) => {
@@ -109,6 +170,9 @@ function downloadFile(url, destination) {
                 url.startsWith("https")
                     ? https
                     : http;
+
+            let finished = false;
+            let downloaded = 0;
 
             const request =
                 protocol.get(
@@ -122,7 +186,7 @@ function downloadFile(url, destination) {
                     response => {
 
                         /*
-                            Handle redirects
+                            Follow redirects
                         */
                         if (
                             response.statusCode >= 300 &&
@@ -163,10 +227,10 @@ function downloadFile(url, destination) {
                                 destination
                             );
 
-                        let downloaded = 0;
-                        let sizeLimitReached = false;
 
-
+                        /*
+                            Monitor downloaded size
+                        */
                         response.on(
                             "data",
                             chunk => {
@@ -174,17 +238,17 @@ function downloadFile(url, destination) {
                                 downloaded +=
                                     chunk.length;
 
-
                                 if (
                                     downloaded >
                                     MAX_FILE_SIZE &&
-                                    !sizeLimitReached
+                                    !finished
                                 ) {
 
-                                    sizeLimitReached =
-                                        true;
+                                    finished = true;
 
                                     request.destroy();
+
+                                    response.destroy();
 
                                     file.destroy();
 
@@ -199,6 +263,7 @@ function downloadFile(url, destination) {
                                         )
                                     );
                                 }
+
                             }
                         );
 
@@ -210,7 +275,17 @@ function downloadFile(url, destination) {
                             "finish",
                             () => {
 
-                                file.close(resolve);
+                                if (
+                                    finished
+                                ) {
+                                    return;
+                                }
+
+                                finished = true;
+
+                                file.close(
+                                    () => resolve()
+                                );
 
                             }
                         );
@@ -219,6 +294,14 @@ function downloadFile(url, destination) {
                         file.on(
                             "error",
                             error => {
+
+                                if (
+                                    finished
+                                ) {
+                                    return;
+                                }
+
+                                finished = true;
 
                                 fs.unlink(
                                     destination,
@@ -234,9 +317,20 @@ function downloadFile(url, destination) {
                 );
 
 
+            /*
+                Download timeout
+            */
             request.setTimeout(
-                120000,
+                DOWNLOAD_TIMEOUT,
                 () => {
+
+                    if (
+                        finished
+                    ) {
+                        return;
+                    }
+
+                    finished = true;
 
                     request.destroy();
 
@@ -252,7 +346,19 @@ function downloadFile(url, destination) {
 
             request.on(
                 "error",
-                reject
+                error => {
+
+                    if (
+                        finished
+                    ) {
+                        return;
+                    }
+
+                    finished = true;
+
+                    reject(error);
+
+                }
             );
 
         }
@@ -260,16 +366,19 @@ function downloadFile(url, destination) {
 }
 
 
-/* ================================
-   GET VIDEO CODEC
-================================ */
+/* =========================================================
+   FFPROBE VIDEO INFORMATION
+========================================================= */
 
-function getVideoCodec(filePath) {
+function probeVideo(
+    filePath
+) {
 
     return new Promise(
         (resolve, reject) => {
 
             const args = [
+
                 "-v",
                 "error",
 
@@ -277,53 +386,39 @@ function getVideoCodec(filePath) {
                 "v:0",
 
                 "-show_entries",
-                "stream=codec_name",
+                "stream=codec_name,pix_fmt,width,height",
 
                 "-of",
-                "default=noprint_wrappers=1:nokey=1",
+                "json",
 
                 filePath
+
             ];
 
 
-            const ffprobeArgs = [
-                "-v",
-                "error",
-
-                "-select_streams",
-                "v:0",
-
-                "-show_entries",
-                "stream=codec_name",
-
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-
-                filePath
-            ];
-
-
-            /*
-                ffmpeg-static does not provide
-                a separate ffprobe binary.
-
-                So we use FFmpeg itself to inspect
-                the file.
-            */
-            const ffmpeg =
+            const process =
                 spawn(
-                    ffmpegPath,
-                    [
-                        "-i",
-                        filePath
-                    ]
+                    ffprobePath,
+                    args
                 );
 
 
+            let stdout = "";
             let stderr = "";
 
 
-            ffmpeg.stderr.on(
+            process.stdout.on(
+                "data",
+                data => {
+
+                    stdout +=
+                        data.toString();
+
+                }
+            );
+
+
+            process.stderr.on(
                 "data",
                 data => {
 
@@ -334,9 +429,32 @@ function getVideoCodec(filePath) {
             );
 
 
-            ffmpeg.on(
+            let timeout =
+                setTimeout(
+                    () => {
+
+                        process.kill(
+                            "SIGKILL"
+                        );
+
+                        reject(
+                            new Error(
+                                "FFprobe timed out."
+                            )
+                        );
+
+                    },
+                    30000
+                );
+
+
+            process.on(
                 "error",
                 error => {
+
+                    clearTimeout(
+                        timeout
+                    );
 
                     reject(error);
 
@@ -344,69 +462,63 @@ function getVideoCodec(filePath) {
             );
 
 
-            ffmpeg.on(
+            process.on(
                 "close",
-                () => {
+                code => {
 
-                    /*
-                        Look for codec information
-                        in FFmpeg's input description.
-                    */
-
-                    const match =
-                        stderr.match(
-                            /Video:\s*([^,\s]+)/i
-                        );
-
-
-                    if (
-                        match &&
-                        match[1]
-                    ) {
-
-                        return resolve(
-                            match[1]
-                                .toLowerCase()
-                                .trim()
-                        );
-
-                    }
-
-
-                    /*
-                        Alternative detection
-                    */
-                    if (
-                        /hevc|h265/i.test(
-                            stderr
-                        )
-                    ) {
-
-                        return resolve(
-                            "hevc"
-                        );
-
-                    }
-
-
-                    if (
-                        /h264|avc1/i.test(
-                            stderr
-                        )
-                    ) {
-
-                        return resolve(
-                            "h264"
-                        );
-
-                    }
-
-
-                    reject(
-                        new Error(
-                            "Unable to determine video codec."
-                        )
+                    clearTimeout(
+                        timeout
                     );
+
+
+                    if (
+                        code !== 0
+                    ) {
+
+                        return reject(
+                            new Error(
+                                `FFprobe failed: ${stderr.slice(-2000)}`
+                            )
+                        );
+
+                    }
+
+
+                    try {
+
+                        const data =
+                            JSON.parse(
+                                stdout
+                            );
+
+
+                        if (
+                            !data.streams ||
+                            !data.streams[0]
+                        ) {
+
+                            return reject(
+                                new Error(
+                                    "FFprobe could not find a video stream."
+                                )
+                            );
+
+                        }
+
+
+                        resolve(
+                            data.streams[0]
+                        );
+
+                    } catch {
+
+                        reject(
+                            new Error(
+                                "FFprobe returned invalid information."
+                            )
+                        );
+
+                    }
 
                 }
             );
@@ -416,165 +528,169 @@ function getVideoCodec(filePath) {
 }
 
 
-/* ================================
-   FAST COMPATIBILITY PROCESSING
-================================ */
+/* =========================================================
+   FFPROBE AUDIO INFORMATION
+========================================================= */
 
-function makeCompatibleMp4(
-    inputPath,
-    outputPath
+function probeAudio(
+    filePath
 ) {
 
     return new Promise(
-        async (resolve, reject) => {
+        (resolve, reject) => {
 
-            try {
+            const args = [
 
-                console.log(
-                    "Checking video codec..."
+                "-v",
+                "error",
+
+                "-select_streams",
+                "a:0",
+
+                "-show_entries",
+                "stream=codec_name,sample_rate,channels",
+
+                "-of",
+                "json",
+
+                filePath
+
+            ];
+
+
+            const process =
+                spawn(
+                    ffprobePath,
+                    args
                 );
 
 
-                const codec =
-                    await getVideoCodec(
-                        inputPath
-                    );
+            let stdout = "";
+            let stderr = "";
 
 
-                console.log(
-                    "Detected video codec:",
-                    codec
-                );
+            process.stdout.on(
+                "data",
+                data => {
 
+                    stdout +=
+                        data.toString();
 
-                /*
-                    H.264 is already compatible.
-
-                    Use stream copy instead of
-                    re-encoding.
-
-                    This is MUCH faster.
-                */
-                if (
-                    codec === "h264" ||
-                    codec === "avc1"
-                ) {
-
-                    console.log(
-                        "H.264 detected. Skipping re-encode."
-                    );
-
-
-                    const args = [
-
-                        "-y",
-
-                        "-i",
-                        inputPath,
-
-                        "-c",
-                        "copy",
-
-                        "-movflags",
-                        "+faststart",
-
-                        outputPath
-
-                    ];
-
-
-                    return runFfmpeg(
-                        args,
-                        "Fast MP4 remux"
-                    )
-                        .then(resolve)
-                        .catch(reject);
                 }
+            );
 
 
-                /*
-                    HEVC/H.265 or another codec.
+            process.stderr.on(
+                "data",
+                data => {
 
-                    Re-encode to H.264.
-                */
+                    stderr +=
+                        data.toString();
 
-                console.log(
-                    `Codec ${codec} detected. Converting to H.264...`
+                }
+            );
+
+
+            let timeout =
+                setTimeout(
+                    () => {
+
+                        process.kill(
+                            "SIGKILL"
+                        );
+
+                        reject(
+                            new Error(
+                                "FFprobe audio check timed out."
+                            )
+                        );
+
+                    },
+                    30000
                 );
 
 
-                const args = [
+            process.on(
+                "error",
+                error => {
 
-                    "-y",
+                    clearTimeout(
+                        timeout
+                    );
 
-                    "-i",
-                    inputPath,
+                    reject(error);
+
+                }
+            );
+
+
+            process.on(
+                "close",
+                code => {
+
+                    clearTimeout(
+                        timeout
+                    );
+
 
                     /*
-                        H.264
+                        Some TikTok files may not
+                        contain a separate audio stream.
                     */
-                    "-c:v",
-                    "libx264",
+                    if (
+                        code !== 0
+                    ) {
 
-                    /*
-                        Faster encoding
-                    */
-                    "-preset",
-                    "veryfast",
+                        return resolve(
+                            null
+                        );
 
-                    /*
-                        Good quality
-                    */
-                    "-crf",
-                    "23",
-
-                    /*
-                        Maximum compatibility
-                    */
-                    "-pix_fmt",
-                    "yuv420p",
-
-                    /*
-                        AAC audio
-                    */
-                    "-c:a",
-                    "aac",
-
-                    "-b:a",
-                    "128k",
-
-                    /*
-                        Web-friendly MP4
-                    */
-                    "-movflags",
-                    "+faststart",
-
-                    outputPath
-
-                ];
+                    }
 
 
-                return runFfmpeg(
-                    args,
-                    "H.264 conversion"
-                )
-                    .then(resolve)
-                    .catch(reject);
+                    try {
 
-            } catch (error) {
+                        const data =
+                            JSON.parse(
+                                stdout
+                            );
 
-                reject(error);
 
-            }
+                        if (
+                            !data.streams ||
+                            !data.streams[0]
+                        ) {
+
+                            return resolve(
+                                null
+                            );
+
+                        }
+
+
+                        resolve(
+                            data.streams[0]
+                        );
+
+                    } catch {
+
+                        resolve(
+                            null
+                        );
+
+                    }
+
+                }
+            );
 
         }
     );
 }
 
 
-/* ================================
+/* =========================================================
    RUN FFMPEG
-================================ */
+========================================================= */
 
 function runFfmpeg(
     args,
@@ -589,7 +705,7 @@ function runFfmpeg(
             );
 
 
-            const ffmpeg =
+            const process =
                 spawn(
                     ffmpegPath,
                     args
@@ -597,9 +713,44 @@ function runFfmpeg(
 
 
             let stderr = "";
+            let finished = false;
 
 
-            ffmpeg.stderr.on(
+            /*
+                FFmpeg timeout
+            */
+            const timeout =
+                setTimeout(
+                    () => {
+
+                        if (
+                            finished
+                        ) {
+                            return;
+                        }
+
+                        console.log(
+                            `${operationName} timed out.`
+                        );
+
+                        process.kill(
+                            "SIGKILL"
+                        );
+
+                        finished = true;
+
+                        reject(
+                            new Error(
+                                `${operationName} timed out.`
+                            )
+                        );
+
+                    },
+                    FFMPEG_TIMEOUT
+                );
+
+
+            process.stderr.on(
                 "data",
                 data => {
 
@@ -608,8 +759,9 @@ function runFfmpeg(
 
                     stderr += text;
 
+
                     /*
-                        Log FFmpeg progress
+                        Show FFmpeg progress
                     */
                     if (
                         text.includes("frame=") ||
@@ -626,9 +778,21 @@ function runFfmpeg(
             );
 
 
-            ffmpeg.on(
+            process.on(
                 "error",
                 error => {
+
+                    if (
+                        finished
+                    ) {
+                        return;
+                    }
+
+                    finished = true;
+
+                    clearTimeout(
+                        timeout
+                    );
 
                     reject(
                         new Error(
@@ -640,63 +804,82 @@ function runFfmpeg(
             );
 
 
-            ffmpeg.on(
+            process.on(
                 "close",
                 code => {
 
                     if (
-                        code === 0
+                        finished
+                    ) {
+                        return;
+                    }
+
+                    finished = true;
+
+                    clearTimeout(
+                        timeout
+                    );
+
+
+                    if (
+                        code !== 0
                     ) {
 
-                        if (
-                            !fs.existsSync(
-                                args[args.length - 1]
+                        return reject(
+                            new Error(
+                                `FFmpeg failed with code ${code}\n${stderr.slice(-5000)}`
                             )
-                        ) {
-
-                            return reject(
-                                new Error(
-                                    "FFmpeg finished but output file was not created."
-                                )
-                            );
-
-                        }
-
-
-                        const stats =
-                            fs.statSync(
-                                args[args.length - 1]
-                            );
-
-
-                        if (
-                            stats.size === 0
-                        ) {
-
-                            return reject(
-                                new Error(
-                                    "FFmpeg created an empty file."
-                                )
-                            );
-
-                        }
-
-
-                        console.log(
-                            `${operationName} completed: ${stats.size} bytes`
                         );
-
-
-                        return resolve();
 
                     }
 
 
-                    reject(
-                        new Error(
-                            `FFmpeg failed with code ${code}\n${stderr.slice(-5000)}`
+                    const outputPath =
+                        args[
+                            args.length - 1
+                        ];
+
+
+                    if (
+                        !fs.existsSync(
+                            outputPath
                         )
+                    ) {
+
+                        return reject(
+                            new Error(
+                                "FFmpeg finished but output file was not created."
+                            )
+                        );
+
+                    }
+
+
+                    const stats =
+                        fs.statSync(
+                            outputPath
+                        );
+
+
+                    if (
+                        stats.size === 0
+                    ) {
+
+                        return reject(
+                            new Error(
+                                "FFmpeg created an empty file."
+                            )
+                        );
+
+                    }
+
+
+                    console.log(
+                        `${operationName} completed: ${stats.size} bytes`
                     );
+
+
+                    resolve();
 
                 }
             );
@@ -706,16 +889,272 @@ function runFfmpeg(
 }
 
 
-/* ================================
+/* =========================================================
+   INTELLIGENT VIDEO PROCESSING
+========================================================= */
+
+async function makeCompatibleMp4(
+    inputPath,
+    outputPath
+) {
+
+    console.log(
+        "Checking video codec with FFprobe..."
+    );
+
+
+    const video =
+        await probeVideo(
+            inputPath
+        );
+
+
+    const audio =
+        await probeAudio(
+            inputPath
+        );
+
+
+    const videoCodec =
+        String(
+            video.codec_name || ""
+        ).toLowerCase();
+
+
+    const pixelFormat =
+        String(
+            video.pix_fmt || ""
+        ).toLowerCase();
+
+
+    const audioCodec =
+        audio
+            ? String(
+                audio.codec_name || ""
+            ).toLowerCase()
+            : null;
+
+
+    console.log(
+        "Video codec:",
+        videoCodec
+    );
+
+
+    console.log(
+        "Pixel format:",
+        pixelFormat
+    );
+
+
+    console.log(
+        "Audio codec:",
+        audioCodec || "none"
+    );
+
+
+    console.log(
+        "Resolution:",
+        `${video.width || "?"}x${video.height || "?"}`
+    );
+
+
+    /*
+        We can safely keep the original
+        video when it is:
+
+        H.264
+        + yuv420p
+
+        and the audio is either:
+
+        AAC
+        OR no audio.
+    */
+    const alreadyCompatible =
+        (
+            videoCodec === "h264" ||
+            videoCodec === "avc1"
+        ) &&
+        (
+            pixelFormat === "yuv420p"
+        ) &&
+        (
+            !audioCodec ||
+            audioCodec === "aac"
+        );
+
+
+    if (
+        alreadyCompatible
+    ) {
+
+        console.log(
+            "Compatible H.264/AAC detected."
+        );
+
+        console.log(
+            "Skipping video re-encoding."
+        );
+
+        console.log(
+            "Using fast stream copy..."
+        );
+
+
+        /*
+            Stream copy:
+
+            NO video encoding
+            NO quality loss
+            Extremely fast
+        */
+        const args = [
+
+            "-y",
+
+            "-i",
+            inputPath,
+
+            "-map",
+            "0:v:0",
+
+            "-map",
+            "0:a?",
+
+            "-c",
+            "copy",
+
+            "-movflags",
+            "+faststart",
+
+            outputPath
+
+        ];
+
+
+        await runFfmpeg(
+            args,
+            "Fast MP4 remux"
+        );
+
+
+        return {
+            converted: false,
+            codec: videoCodec
+        };
+
+    }
+
+
+    /*
+        Everything else gets converted.
+
+        This includes:
+
+        HEVC / H.265
+        H.264 10-bit
+        incompatible pixel formats
+        incompatible audio
+        other video codecs
+    */
+    console.log(
+        `Video requires compatibility conversion. Detected codec: ${videoCodec}`
+    );
+
+
+    console.log(
+        "Converting to H.264 + AAC..."
+    );
+
+
+    const args = [
+
+        "-y",
+
+        "-i",
+        inputPath,
+
+        /*
+            Video
+        */
+        "-map",
+        "0:v:0",
+
+        /*
+            Audio if available
+        */
+        "-map",
+        "0:a?",
+
+        /*
+            H.264
+        */
+        "-c:v",
+        "libx264",
+
+        /*
+            Maximum encoding speed
+        */
+        "-preset",
+        "ultrafast",
+
+        /*
+            Good social-video quality
+        */
+        "-crf",
+        "24",
+
+        /*
+            Broad compatibility
+        */
+        "-pix_fmt",
+        "yuv420p",
+
+        /*
+            AAC audio
+        */
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "128k",
+
+        /*
+            Fast-start MP4
+        */
+        "-movflags",
+        "+faststart",
+
+        outputPath
+
+    ];
+
+
+    await runFfmpeg(
+        args,
+        "H.264 conversion"
+    );
+
+
+    return {
+        converted: true,
+        codec: videoCodec
+    };
+}
+
+
+/* =========================================================
    DOWNLOAD API
-================================ */
+========================================================= */
 
 app.post(
     "/api/download",
     async (req, res) => {
 
-        const { url } =
-            req.body || {};
+        const {
+            url
+        } = req.body || {};
 
 
         /*
@@ -763,16 +1202,23 @@ app.post(
         }
 
 
+        /*
+            Create temporary job
+        */
         const job =
             createJobDirectory();
 
 
+        const timestamp =
+            Date.now();
+
+
         const originalFilename =
-            `original-${Date.now()}.mp4`;
+            `original-${timestamp}.mp4`;
 
 
         const finalFilename =
-            `tiktok-${Date.now()}.mp4`;
+            `tiktok-${timestamp}.mp4`;
 
 
         const originalPath =
@@ -792,13 +1238,24 @@ app.post(
         try {
 
             console.log(
-                "Processing TikTok:",
+                "======================================"
+            );
+
+            console.log(
+                "Processing TikTok:"
+            );
+
+            console.log(
                 cleanUrl
+            );
+
+            console.log(
+                "======================================"
             );
 
 
             /*
-                Get TikTok video
+                Get TikTok media
             */
             const result =
                 await download(
@@ -807,12 +1264,6 @@ app.post(
                         quality: "best"
                     }
                 );
-
-
-            console.log(
-                "TikTok API result:",
-                result
-            );
 
 
             if (
@@ -827,8 +1278,9 @@ app.post(
             }
 
 
-            const videoUrl =
-                result.video;
+            console.log(
+                "TikTok video URL received."
+            );
 
 
             /*
@@ -840,11 +1292,14 @@ app.post(
 
 
             await downloadFile(
-                videoUrl,
+                result.video,
                 originalPath
             );
 
 
+            /*
+                Verify original
+            */
             if (
                 !fs.existsSync(
                     originalPath
@@ -902,36 +1357,46 @@ app.post(
 
 
             /*
-                INTELLIGENT PROCESSING
+                Intelligent compatibility processing
             */
-            await makeCompatibleMp4(
-                originalPath,
-                finalPath
+            const processingResult =
+                await makeCompatibleMp4(
+                    originalPath,
+                    finalPath
+                );
+
+
+            console.log(
+                "Processing result:",
+                processingResult
             );
 
 
             /*
-                Delete original HEVC/source file
+                Delete original source file
             */
-            fs.unlink(
-                originalPath,
-                error => {
+            try {
 
-                    if (error) {
+                fs.unlinkSync(
+                    originalPath
+                );
 
-                        console.log(
-                            "Could not delete original file:",
-                            error.message
-                        );
+                console.log(
+                    "Original temporary file deleted."
+                );
 
-                    }
+            } catch (error) {
 
-                }
-            );
+                console.log(
+                    "Could not delete original file:",
+                    error.message
+                );
+
+            }
 
 
             /*
-                Verify final file
+                Verify final MP4
             */
             if (
                 !fs.existsSync(
@@ -940,7 +1405,7 @@ app.post(
             ) {
 
                 throw new Error(
-                    "Final video file was not created."
+                    "Final MP4 was not created."
                 );
 
             }
@@ -957,12 +1422,15 @@ app.post(
             ) {
 
                 throw new Error(
-                    "Final video is empty."
+                    "Final MP4 is empty."
                 );
 
             }
 
 
+            /*
+                Final 200 MB protection
+            */
             if (
                 finalStats.size >
                 MAX_FILE_SIZE
@@ -977,7 +1445,7 @@ app.post(
                     ok: false,
 
                     error:
-                        "The final video is larger than the 200 MB limit."
+                        "The processed video is larger than the 200 MB limit."
 
                 });
 
@@ -990,10 +1458,15 @@ app.post(
 
 
             /*
-                Keep file alive for 5 minutes
+                Automatically remove temporary files
+                after 5 minutes.
             */
             setTimeout(
                 () => {
+
+                    console.log(
+                        `Cleaning up job ${job.id}`
+                    );
 
                     cleanupDirectory(
                         job.directory
@@ -1005,7 +1478,7 @@ app.post(
 
 
             /*
-                Return download URL
+                Return download information
             */
             return res.json({
 
@@ -1023,17 +1496,26 @@ app.post(
         } catch (error) {
 
             console.error(
-                "DOWNLOAD ERROR:",
+                "======================================"
+            );
+
+            console.error(
+                "DOWNLOAD ERROR:"
+            );
+
+            console.error(
                 error
             );
 
-
             console.error(
-                "ERROR MESSAGE:",
-                error.message
+                "======================================"
             );
 
 
+            /*
+                Delete everything belonging
+                to this failed job.
+            */
             cleanupDirectory(
                 job.directory
             );
@@ -1054,16 +1536,17 @@ app.post(
 );
 
 
-/* ================================
-   FILE DOWNLOAD
-================================ */
+/* =========================================================
+   FILE DOWNLOAD ROUTE
+========================================================= */
 
 app.get(
     "/api/file/:jobId/:filename",
     (req, res) => {
 
-        const { jobId } =
-            req.params;
+        const {
+            jobId
+        } = req.params;
 
 
         const filename =
@@ -1088,6 +1571,9 @@ app.get(
         }
 
 
+        /*
+            Build paths
+        */
         const jobDirectory =
             path.join(
                 DOWNLOAD_DIR,
@@ -1132,7 +1618,7 @@ app.get(
 
 
         /*
-            Check file exists
+            File must exist
         */
         if (
             !fs.existsSync(
@@ -1148,14 +1634,16 @@ app.get(
 
 
         /*
-            Force MP4 download
+            Force browser download
         */
         res.download(
             resolvedFile,
             filename,
             error => {
 
-                if (error) {
+                if (
+                    error
+                ) {
 
                     console.error(
                         "File download error:",
@@ -1171,16 +1659,33 @@ app.get(
 );
 
 
-/* ================================
+/* =========================================================
    START SERVER
-================================ */
+========================================================= */
 
 app.listen(
     PORT,
     () => {
 
         console.log(
+            "======================================"
+        );
+
+        console.log(
             `TikTok Downloader running on port ${PORT}`
+        );
+
+        console.log(
+            `FFmpeg: ${ffmpegPath}`
+        );
+
+        console.log(
+            `FFprobe: ${ffprobePath}`
+        );
+
+        console.log(
+            "======================================"
+
         );
 
     }
