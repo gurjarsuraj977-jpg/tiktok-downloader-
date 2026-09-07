@@ -1,4 +1,4 @@
-```js
+
 const express = require("express");
 const { TeraBoxApp } = require("@cfbeg/terabox-api");
 
