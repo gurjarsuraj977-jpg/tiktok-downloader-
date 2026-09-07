@@ -180,7 +180,7 @@ const jsToken =
 
 if (!jsToken) {
     throw new Error(
-        "No TeraBox jsToken available. Add TERABOX_JSTOKEN in Render."
+        "No TeraBox jsToken available."
     );
 }
 
