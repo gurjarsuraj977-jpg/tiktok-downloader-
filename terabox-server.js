@@ -4,12 +4,16 @@ const { TeraBoxApp } = require("@cfbeg/terabox-api");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-async function main() {
+async function testTransfer() {
     const ndus =
-        String(process.env.TERABOX_NDUS || "").trim();
+        String(
+            process.env.TERABOX_NDUS || ""
+        ).trim();
 
     if (!ndus) {
-        throw new Error("TERABOX_NDUS is missing.");
+        throw new Error(
+            "TERABOX_NDUS is missing."
+        );
     }
 
     const tb =
@@ -21,81 +25,104 @@ async function main() {
     const login =
         await tb.checkLogin();
 
-    console.log(
-        "LOGIN ERRNO:",
-        login?.errno
-    );
-
     if (
         !login ||
         Number(login.errno) !== 0
     ) {
-        throw new Error("TeraBox login failed.");
+        throw new Error(
+            "TeraBox login failed."
+        );
     }
 
-    /*
-     * These are metadata from the exact public share
-     * you already resolved successfully in Chrome.
-     *
-     * No cookies or tokens are placed in this file.
-     */
-
     const shareId =
-        "581605428011";
+        581605428011;
 
     const fromUk =
-        "4400995370102";
+        4400995370102;
 
     const fsId =
-        "842937368323081";
+        842937368323081;
+
+    const destination =
+        "/TeraBox-Downloads";
 
     console.log(
-        "Checking whether shared file can be transferred..."
+        "Checking transfer status..."
     );
 
     const check =
         await tb.querySurlTransfer(
-            Number(shareId),
-            Number(fromUk)
+            shareId,
+            fromUk
         );
 
     console.log(
-        "TRANSFER CHECK:"
+        "Transfer check:",
+        JSON.stringify(
+            check
+        )
+    );
+
+    if (
+        !check ||
+        Number(check.errno) !== 0
+    ) {
+        throw new Error(
+            "Transfer check failed."
+        );
+    }
+
+    console.log(
+        "Running shareTransfer..."
+    );
+
+    const result =
+        await tb.shareTransfer(
+            shareId,
+            fromUk,
+            [fsId],
+            destination,
+            {
+                ondup:
+                    "newcopy"
+            }
+        );
+
+    console.log(
+        "Transfer result:"
     );
 
     console.log(
         JSON.stringify(
-            check,
+            result,
             null,
             2
         )
     );
 
-    /*
-     * We stop here for the first test.
-     * This avoids creating a duplicate copy without
-     * first confirming that TeraBox allows the transfer.
-     */
-
-    return check;
+    return result;
 }
 
 app.get(
     "/",
     async (req, res) => {
+
         try {
+
             const result =
-                await main();
+                await testTransfer();
 
             res.json({
                 ok: true,
-                transferCheck: result
+                message:
+                    "TeraBox share transfer completed.",
+                result
             });
 
         } catch (error) {
 
             console.error(
-                "TRANSFER TEST FAILED:",
+                "TRANSFER FAILED:",
                 error.message
             );
 
@@ -104,13 +131,16 @@ app.get(
                 error:
                     error.message
             });
+
         }
+
     }
 );
 
 app.get(
     "/api/health",
     (req, res) => {
+
         res.json({
             ok: true,
             service:
@@ -118,6 +148,7 @@ app.get(
             status:
                 "running"
         });
+
     }
 );
 
@@ -125,9 +156,11 @@ app.listen(
     PORT,
     "0.0.0.0",
     () => {
+
         console.log(
             "TeraBox Transfer Test running on port " +
             PORT
         );
+
     }
 );
