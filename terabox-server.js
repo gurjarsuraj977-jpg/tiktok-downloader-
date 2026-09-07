@@ -114,8 +114,24 @@ async function resolveSharedLink(url) {
     const tb =
         await createClient();
 
+    const value = String(url || "").trim();
+
+    let match =
+        value.match(/[?&]surl=([A-Za-z0-9_-]+)/i);
+
+    if (!match) {
+        match =
+            value.match(/\/s\/([A-Za-z0-9_-]+)/i);
+    }
+
+    if (!match) {
+        throw new Error(
+            "Could not extract the TeraBox share code."
+        );
+    }
+
     const shortUrl =
-        extractShortUrl(url);
+        "s/" + match[1];
 
     console.log(
         "Resolving TeraBox share..."
