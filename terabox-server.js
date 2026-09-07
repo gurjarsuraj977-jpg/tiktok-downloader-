@@ -4,7 +4,7 @@ const { TeraBoxApp } = require("@cfbeg/terabox-api");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-async function testTeraBox() {
+async function main() {
     const ndus = String(
         process.env.TERABOX_NDUS || ""
     ).trim();
@@ -22,44 +22,41 @@ async function testTeraBox() {
         "ndus"
     );
 
+    console.log("TeraBoxApp created.");
+
+    // Show available methods without printing secrets.
+    const prototypeMethods =
+        Object.getOwnPropertyNames(
+            Object.getPrototypeOf(tb)
+        ).filter(
+            name =>
+                name !== "constructor"
+        );
+
     console.log(
-        "TeraBoxApp created successfully."
+        "Available TeraBoxApp methods:",
+        prototypeMethods
     );
 
-    console.log(
-        "Updating TeraBox session data..."
-    );
-
-    await tb.update_app_data();
-
-    console.log(
-        "Session data updated successfully."
-    );
-
-    console.log(
-        "jsToken available:",
-        Boolean(tb.data?.jsToken)
-    );
+    // Try the current Node-style method.
+    if (
+        typeof tb.checkLogin !==
+        "function"
+    ) {
+        throw new Error(
+            "checkLogin() was not found. See the methods printed above."
+        );
+    }
 
     console.log(
-        "pcftoken available:",
-        Boolean(tb.data?.pcftoken)
-    );
-
-    console.log(
-        "csrf available:",
-        Boolean(tb.data?.csrf)
-    );
-
-    console.log(
-        "Checking TeraBox login..."
+        "Running checkLogin()..."
     );
 
     const loginResult =
-        await tb.check_login();
+        await tb.checkLogin();
 
     console.log(
-        "Login check completed."
+        "checkLogin completed."
     );
 
     console.log(
@@ -71,89 +68,83 @@ async function testTeraBox() {
         )
     );
 
+    // Try user information if available.
     let userInfo = null;
 
-    try {
-        userInfo =
-            await tb.get_current_user_info();
-
-        console.log(
-            "User information retrieved."
-        );
-
-        console.log(
-            "User info:",
-            JSON.stringify(
-                userInfo,
-                null,
-                2
-            )
-        );
-    } catch (error) {
-        console.log(
-            "User info request failed:",
-            error.message
-        );
-    }
-
-    return {
-        loginResult,
-        userInfo
-    };
-}
-
-app.get(
-    "/api/health",
-    (req, res) => {
-        res.json({
-            ok: true,
-            service: "TeraBox Auth Test",
-            status: "running"
-        });
-    }
-);
-
-app.get(
-    "/",
-    async (req, res) => {
+    if (
+        typeof tb.getCurrentUserInfo ===
+        "function"
+    ) {
         try {
-            const result =
-                await testTeraBox();
+            userInfo =
+                await tb.getCurrentUserInfo();
 
-            res.json({
-                ok: true,
-                authenticated: true,
-                message:
-                    "TeraBox authentication test passed.",
-                loginResult:
-                    result.loginResult,
-                userInfo:
-                    result.userInfo
-            });
-        } catch (error) {
-            console.error(
-                "TeraBox authentication test failed:",
-                error
+            console.log(
+                "User info retrieved."
             );
 
-            res.status(500).json({
-                ok: false,
-                authenticated: false,
-                error:
-                    error.message ||
-                    "TeraBox authentication failed."
-            });
+            console.log(
+                "User info:",
+                JSON.stringify(
+                    userInfo,
+                    null,
+                    2
+                )
+            );
+        } catch (error) {
+            console.log(
+                "User info failed:",
+                error.message
+            );
         }
     }
-);
 
-app.listen(
-    PORT,
-    "0.0.0.0",
-    () => {
-        console.log(
-            "TeraBox Auth Test running on port " +
-            PORT
-        );
-    }
-);
+    app.get(
+        "/",
+        (req, res) => {
+            res.json({
+                ok: true,
+                authenticated:
+                    true,
+                message:
+                    "TeraBox authentication test passed."
+            });
+        }
+    );
+
+    app.get(
+        "/api/health",
+        (req, res) => {
+            res.json({
+                ok: true,
+                service:
+                    "TeraBox Auth Test",
+                status:
+                    "running"
+            });
+        }
+    );
+
+    app.listen(
+        PORT,
+        "0.0.0.0",
+        () => {
+            console.log(
+                "TeraBox Auth Test running on port " +
+                PORT
+            );
+        }
+    );
+}
+
+main().catch(error => {
+    console.error(
+        "TeraBox authentication test failed:"
+    );
+
+    console.error(
+        error.message
+    );
+
+    process.exit(1);
+});
