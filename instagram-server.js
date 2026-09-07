@@ -2089,7 +2089,7 @@ async function pollJob(
 
         const response =
             await fetch(
-                `/api/status/${encodeURIComponent(jobId)}`
+                "/api/status/" + encodeURIComponent(jobId)
             );
 
         const data =
