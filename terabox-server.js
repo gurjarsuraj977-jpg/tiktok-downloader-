@@ -4,14 +4,14 @@ const { TeraBoxApp } = require("@cfbeg/terabox-api");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-async function testTeraBox() {
+async function testDownload() {
     const ndus = String(
         process.env.TERABOX_NDUS || ""
     ).trim();
 
     if (!ndus) {
         throw new Error(
-            "TERABOX_NDUS is missing in Render."
+            "TERABOX_NDUS is missing."
         );
     }
 
@@ -22,13 +22,12 @@ async function testTeraBox() {
         "ndus"
     );
 
-    console.log("Checking login...");
-
-    const login = await tb.checkLogin();
+    const login =
+        await tb.checkLogin();
 
     console.log(
-        "Login result:",
-        JSON.stringify(login, null, 2)
+        "Login:",
+        JSON.stringify(login)
     );
 
     if (
@@ -36,27 +35,20 @@ async function testTeraBox() {
         Number(login.errno) !== 0
     ) {
         throw new Error(
-            "TeraBox login/session is not valid."
+            "TeraBox login failed."
         );
     }
 
-    console.log("Listing root directory...");
-
-    const result =
-        await tb.getRemoteDir("/");
-
     console.log(
-        "Root directory result:",
-        JSON.stringify(
-            result,
-            null,
-            2
-        )
+        "Getting root directory..."
     );
 
+    const remote =
+        await tb.getRemoteDir("/");
+
     const list =
-        result?.data?.list ||
-        result?.list ||
+        remote?.data?.list ||
+        remote?.list ||
         [];
 
     console.log(
@@ -64,36 +56,74 @@ async function testTeraBox() {
         list.length
     );
 
-    for (const item of list.slice(0, 10)) {
-        console.log(
-            "FILE:",
-            item.server_filename ||
-            item.filename ||
-            item.path ||
-            "(unknown)"
+    if (!list.length) {
+        throw new Error(
+            "No files found in root."
         );
     }
 
-    return {
-        login,
-        count: list.length,
-        files: list.slice(0, 10).map(
-            item => ({
-                name:
-                    item.server_filename ||
-                    item.filename ||
-                    "",
-                path:
-                    item.path ||
-                    "",
-                size:
-                    Number(item.size || 0),
-                fs_id:
-                    String(item.fs_id || ""),
-                isdir:
-                    String(item.isdir || "0")
-            })
+    const firstFile =
+        list.find(
+            item =>
+                String(item.isdir) !== "1"
+        );
+
+    if (!firstFile) {
+        throw new Error(
+            "No downloadable file found."
+        );
+    }
+
+    console.log(
+        "Testing download link for:",
+        firstFile.server_filename ||
+        firstFile.filename
+    );
+
+    console.log(
+        "FS ID:",
+        String(firstFile.fs_id)
+    );
+
+    const downloadResult =
+        await tb.download([
+            String(firstFile.fs_id)
+        ]);
+
+    console.log(
+        "Download API response received."
+    );
+
+    console.log(
+        JSON.stringify(
+            downloadResult,
+            null,
+            2
         )
+    );
+
+    const downloadList =
+        downloadResult?.data?.list ||
+        downloadResult?.list ||
+        [];
+
+    const item =
+        downloadList[0] || null;
+
+    return {
+        filename:
+            firstFile.server_filename ||
+            firstFile.filename ||
+            "",
+
+        fs_id:
+            String(firstFile.fs_id || ""),
+
+        size:
+            Number(firstFile.size || 0),
+
+        dlink:
+            item?.dlink || ""
     };
 }
 
@@ -102,10 +132,8 @@ app.get(
     (req, res) => {
         res.json({
             ok: true,
-            service:
-                "TeraBox Auth Test",
-            status:
-                "running"
+            service: "TeraBox Download Test",
+            status: "running"
         });
     }
 );
@@ -113,32 +141,40 @@ app.get(
 app.get(
     "/",
     async (req, res) => {
+
         try {
+
             const result =
-                await testTeraBox();
+                await testDownload();
 
             res.json({
                 ok: true,
-                authenticated: true,
-                fileCount:
-                    result.count,
-                files:
-                    result.files
+                message:
+                    "TeraBox download-link test passed.",
+                file:
+                    result.filename,
+                size:
+                    result.size,
+                fs_id:
+                    result.fs_id,
+                downloadLinkAvailable:
+                    Boolean(
+                        result.dlink
+                    )
             });
 
         } catch (error) {
 
             console.error(
-                "TeraBox test failed:",
+                "Download test failed:",
                 error
             );
 
             res.status(500).json({
                 ok: false,
-                authenticated: false,
                 error:
                     error.message ||
-                    "TeraBox test failed."
+                    "Download test failed."
             });
         }
     }
@@ -149,7 +185,7 @@ app.listen(
     "0.0.0.0",
     () => {
         console.log(
-            "TeraBox Auth Test running on port " +
+            "TeraBox Download Test running on port " +
             PORT
         );
     }
