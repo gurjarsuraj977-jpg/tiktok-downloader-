@@ -130,24 +130,32 @@ async function resolveSharedLink(url) {
         "Share info received."
     );
 
-    const listed =
-        await tb.shortUrlList(
-            shortUrl,
-            "",
-            1
-        );
-
-    console.log(
-        "Shared file list received."
+const listed =
+    await tb.shortUrlList(
+        shortUrl,
+        "",
+        1
     );
 
-    const rawFiles =
-        listed?.data?.list ||
-        listed?.list ||
-        info?.data?.list ||
-        info?.list ||
-        [];
+console.log(
+    "Shared file list received."
+);
 
+const rawFiles =
+    Array.isArray(listed?.list)
+        ? listed.list
+        : Array.isArray(listed?.data?.list)
+            ? listed.data.list
+            : Array.isArray(info?.list)
+                ? info.list
+                : Array.isArray(info?.data?.list)
+                    ? info.data.list
+                    : [];
+
+console.log(
+    "Shared files detected:",
+    rawFiles.length
+);
     const files =
         rawFiles
             .filter(
