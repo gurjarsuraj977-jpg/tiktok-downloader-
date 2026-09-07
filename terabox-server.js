@@ -185,13 +185,17 @@ async function resolveShare(url) {
     const tb =
         await createClient();
 
-    const shareCode =
-        extractShareCode(url);
+const shareCode =
+    extractShareCode(url);
 
-    const candidates = [
-        "s/" + shareCode,
-        shareCode
-    ];
+const cleanSurl =
+    shareCode.startsWith("1")
+        ? shareCode.slice(1)
+        : shareCode;
+
+const candidates = [
+    cleanSurl
+];
 
     let lastError = null;
 
