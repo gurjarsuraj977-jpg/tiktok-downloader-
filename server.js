@@ -2,6 +2,9 @@ const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const https = require("https");
+const http = require("http");
+
 const { TikTok } = require("@satorufx/mediadownloader");
 
 const app = express();
@@ -51,23 +54,6 @@ function createJobDirectory() {
     };
 }
 
-function findVideoFile(directory) {
-    const files = fs.readdirSync(directory);
-
-    const allowedExtensions = [
-        ".mp4",
-        ".webm",
-        ".mkv",
-        ".mov"
-    ];
-
-    return files.find(file =>
-        allowedExtensions.includes(
-            path.extname(file).toLowerCase()
-        )
-    );
-}
-
 function cleanupDirectory(directory) {
     fs.rm(
         directory,
@@ -79,7 +65,113 @@ function cleanupDirectory(directory) {
     );
 }
 
+function downloadFile(url, destination) {
+    return new Promise((resolve, reject) => {
+        const protocol = url.startsWith("https")
+            ? https
+            : http;
+
+        const request = protocol.get(
+            url,
+            {
+                headers: {
+                    "User-Agent":
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+                }
+            },
+            response => {
+
+                if (
+                    response.statusCode >= 300 &&
+                    response.statusCode < 400 &&
+                    response.headers.location
+                ) {
+                    response.resume();
+
+                    return downloadFile(
+                        response.headers.location,
+                        destination
+                    )
+                        .then(resolve)
+                        .catch(reject);
+                }
+
+                if (response.statusCode !== 200) {
+                    response.resume();
+
+                    return reject(
+                        new Error(
+                            `Video server returned HTTP ${response.statusCode}`
+                        )
+                    );
+                }
+
+                const file = fs.createWriteStream(
+                    destination
+                );
+
+                let downloaded = 0;
+
+                response.on("data", chunk => {
+                    downloaded += chunk.length;
+
+                    if (
+                        downloaded >
+                        MAX_FILE_SIZE
+                    ) {
+                        request.destroy();
+
+                        file.destroy();
+
+                        fs.unlink(
+                            destination,
+                            () => {}
+                        );
+
+                        reject(
+                            new Error(
+                                "Video exceeds the 200 MB limit."
+                            )
+                        );
+                    }
+                });
+
+                response.pipe(file);
+
+                file.on("finish", () => {
+                    file.close(resolve);
+                });
+
+                file.on("error", error => {
+                    fs.unlink(
+                        destination,
+                        () => {}
+                    );
+
+                    reject(error);
+                });
+            }
+        );
+
+        request.setTimeout(
+            120000,
+            () => {
+                request.destroy();
+
+                reject(
+                    new Error(
+                        "Video download timed out."
+                    )
+                );
+            }
+        );
+
+        request.on("error", reject);
+    });
+}
+
 app.post("/api/download", async (req, res) => {
+
     const { url } = req.body || {};
 
     if (!url || typeof url !== "string") {
@@ -89,7 +181,9 @@ app.post("/api/download", async (req, res) => {
         });
     }
 
-    if (!isValidTikTokUrl(url.trim())) {
+    const cleanUrl = url.trim();
+
+    if (!isValidTikTokUrl(cleanUrl)) {
         return res.status(400).json({
             ok: false,
             error: "Please enter a valid TikTok URL."
@@ -99,35 +193,70 @@ app.post("/api/download", async (req, res) => {
     const job = createJobDirectory();
 
     try {
-        await ytdlp(url.trim(), {
-            output: path.join(
-                job.directory,
-                "%(title).100s.%(ext)s"
-            ),
-            format: "best",
-            noPlaylist: true,
-            noWarnings: true,
-            quiet: true,
-            restrictFilenames: true,
-        });
 
-        const filename = findVideoFile(job.directory);
+        console.log(
+            "Processing TikTok:",
+            cleanUrl
+        );
 
-        if (!filename) {
+        const result = await TikTok(cleanUrl);
+
+        console.log(
+            "TikTok API result:",
+            result
+        );
+
+        if (
+            !result ||
+            !result.video
+        ) {
             throw new Error(
-                "No video file was produced."
+                "TikTok downloader did not return a video URL."
             );
         }
+
+        const videoUrl = result.video;
+
+        const filename =
+            `tiktok-${Date.now()}.mp4`;
 
         const filePath = path.join(
             job.directory,
             filename
         );
 
-        const stats = fs.statSync(filePath);
+        console.log(
+            "Downloading video..."
+        );
 
-        if (stats.size > MAX_FILE_SIZE) {
-            cleanupDirectory(job.directory);
+        await downloadFile(
+            videoUrl,
+            filePath
+        );
+
+        if (!fs.existsSync(filePath)) {
+            throw new Error(
+                "Video file was not created."
+            );
+        }
+
+        const stats = fs.statSync(
+            filePath
+        );
+
+        if (stats.size === 0) {
+            throw new Error(
+                "Downloaded video is empty."
+            );
+        }
+
+        if (
+            stats.size >
+            MAX_FILE_SIZE
+        ) {
+            cleanupDirectory(
+                job.directory
+            );
 
             return res.status(413).json({
                 ok: false,
@@ -136,8 +265,14 @@ app.post("/api/download", async (req, res) => {
             });
         }
 
+        console.log(
+            `Video downloaded successfully: ${stats.size} bytes`
+        );
+
         setTimeout(() => {
-            cleanupDirectory(job.directory);
+            cleanupDirectory(
+                job.directory
+            );
         }, FILE_EXPIRY);
 
         return res.json({
@@ -159,17 +294,14 @@ app.post("/api/download", async (req, res) => {
             error.message
         );
 
-        console.error(
-            "ERROR STDERR:",
-            error.stderr
+        cleanupDirectory(
+            job.directory
         );
-
-        cleanupDirectory(job.directory);
 
         return res.status(500).json({
             ok: false,
             error:
-                "Unable to process this video. Make sure the TikTok video is publicly accessible and the URL is correct."
+                "Unable to process this TikTok video. Please make sure the video is public and the URL is correct."
         });
     }
 });
@@ -181,33 +313,46 @@ app.get(
         const { jobId } = req.params;
 
         const filename =
-            decodeURIComponent(req.params.filename);
+            decodeURIComponent(
+                req.params.filename
+            );
 
-        if (!/^[a-f0-9]{32}$/.test(jobId)) {
+        if (
+            !/^[a-f0-9]{32}$/.test(
+                jobId
+            )
+        ) {
             return res.status(400).send(
                 "Invalid request."
             );
         }
 
-        const jobDirectory = path.join(
-            DOWNLOAD_DIR,
-            jobId
-        );
+        const jobDirectory =
+            path.join(
+                DOWNLOAD_DIR,
+                jobId
+            );
 
-        const filePath = path.join(
-            jobDirectory,
-            filename
-        );
+        const filePath =
+            path.join(
+                jobDirectory,
+                filename
+            );
 
         const resolvedDirectory =
-            path.resolve(jobDirectory);
+            path.resolve(
+                jobDirectory
+            );
 
         const resolvedFile =
-            path.resolve(filePath);
+            path.resolve(
+                filePath
+            );
 
         if (
             !resolvedFile.startsWith(
-                resolvedDirectory + path.sep
+                resolvedDirectory +
+                path.sep
             )
         ) {
             return res.status(400).send(
@@ -215,7 +360,11 @@ app.get(
             );
         }
 
-        if (!fs.existsSync(resolvedFile)) {
+        if (
+            !fs.existsSync(
+                resolvedFile
+            )
+        ) {
             return res.status(404).send(
                 "File expired or no longer exists."
             );
@@ -237,8 +386,11 @@ app.get(
     }
 );
 
-app.listen(PORT, () => {
-    console.log(
-        `TikTok Downloader running on port ${PORT}`
-    );
-});
+app.listen(
+    PORT,
+    () => {
+        console.log(
+            `TikTok Downloader running on port ${PORT}`
+        );
+    }
+);
