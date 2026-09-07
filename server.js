@@ -199,7 +199,9 @@ app.post("/api/download", async (req, res) => {
             cleanUrl
         );
 
-        const result = await TikTok(cleanUrl);
+const result = await download(cleanUrl, {
+    quality: "best"
+});
 
         console.log(
             "TikTok API result:",
