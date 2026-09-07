@@ -2,7 +2,7 @@ const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
-const ytdlp = require("yt-dlp-exec");
+const ytdlp = require("youtube-dl-exec");
 
 const app = express();
 
