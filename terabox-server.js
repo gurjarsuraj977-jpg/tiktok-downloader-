@@ -159,10 +159,38 @@ app.get("/api/files", async (req, res) => {
             remotePath
         );
 
-        const result =
-            await tb.getRemoteDir(
-                remotePath
-            );
+const result =
+    await Promise.race([
+        tb.getRemoteDir(
+            remotePath,
+            1
+        ),
+        new Promise((_, reject) =>
+            setTimeout(
+                () =>
+                    reject(
+                        new Error(
+                            "TeraBox directory request timed out."
+                        )
+                    ),
+                30000
+            )
+        )
+    ]);
+
+console.log(
+    "getRemoteDir response received."
+);
+
+console.log(
+    "getRemoteDir errno:",
+    result?.errno
+);
+
+console.log(
+    "getRemoteDir keys:",
+    Object.keys(result || {})
+);
 
         const files =
             getList(result).map(
