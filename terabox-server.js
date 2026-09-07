@@ -5,7 +5,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 async function test() {
-
     const ndus =
         String(
             process.env.TERABOX_NDUS || ""
@@ -40,81 +39,17 @@ async function test() {
         );
     }
 
-    /*
-     * Use the same hostname your browser is using.
-     */
-    tb.params.whost =
-        "https://dm.terabox.app";
-
-    const surl =
+    const shortUrl =
         "N1_3C7UX3ZxIMjNi_D62Ag";
 
-    const params =
-        new URLSearchParams({
-            clientfrom: "h5",
-            psign: "0",
-            pcftoken:
-                String(
-                    tb.data?.pcftoken || ""
-                ),
-            clienttype: "0",
-            channel: "dubox",
-            shorturl:
-                "1" + surl,
-            root: "1",
-            scene: "",
-            app_id: "250528",
-            web: "1",
-            jsToken:
-                String(
-                    tb.data?.jsToken || ""
-                ),
-            "dp-logid":
-                String(
-                    tb.data?.logid || "0"
-                )
-        });
-
-    /*
-     * IMPORTANT:
-     * We do not print token values.
-     */
-
     console.log(
-        "Hostname:",
-        tb.params.whost
-    );
-
-    console.log(
-        "jsToken configured:",
-        Boolean(tb.data?.jsToken)
-    );
-
-    console.log(
-        "pcftoken configured:",
-        Boolean(tb.data?.pcftoken)
-    );
-
-    console.log(
-        "Calling exact browser-style shorturlinfo..."
+        "Calling shortUrlInfo with:",
+        shortUrl
     );
 
     const result =
-        await tb.doReq(
-            "/api/shorturlinfo?" +
-            params.toString(),
-            {
-                method: "GET",
-                headers: {
-                    "Accept":
-                        "application/json, text/plain, */*",
-                    "X-Requested-With":
-                        "XMLHttpRequest",
-                    "Referer":
-                        "https://dm.terabox.app/sharing/link?surl=" +
-                        surl
-                }
-            }
+        await tb.shortUrlInfo(
+            shortUrl
         );
 
     console.log(
@@ -128,7 +63,7 @@ async function test() {
     );
 
     console.log(
-        "RESULT LIST:",
+        "RESULT LIST LENGTH:",
         Array.isArray(result?.list)
             ? result.list.length
             : 0
@@ -137,11 +72,9 @@ async function test() {
     if (
         Array.isArray(result?.list)
     ) {
-
         for (
             const file of result.list
         ) {
-
             console.log(
                 "FILE:",
                 file.server_filename ||
@@ -155,13 +88,24 @@ async function test() {
                     file.size || ""
                 )
             );
-
         }
-
     }
 
     return result;
 }
+
+app.get(
+    "/api/health",
+    (req, res) => {
+        res.json({
+            ok: true,
+            service:
+                "TeraBox Share Test",
+            status:
+                "running"
+        });
+    }
+);
 
 app.get(
     "/",
@@ -205,7 +149,7 @@ app.get(
         } catch (error) {
 
             console.error(
-                "DIRECT TEST FAILED:",
+                "TEST FAILED:",
                 error.message
             );
 
@@ -214,9 +158,7 @@ app.get(
                 error:
                     error.message
             });
-
         }
-
     }
 );
 
@@ -224,11 +166,9 @@ app.listen(
     PORT,
     "0.0.0.0",
     () => {
-
         console.log(
-            "TeraBox direct API test running on port " +
+            "TeraBox Share Test running on port " +
             PORT
         );
-
     }
 );
