@@ -212,16 +212,6 @@ app.get("/api/file/:jobId/:filename", (req, res) => {
     );
 });
 
-app.get("*", (req, res) => {
-    res.sendFile(
-        path.join(
-            __dirname,
-            "public",
-            "index.html"
-        )
-    );
-});
-
 app.listen(PORT, () => {
     console.log(
         `TikTok Downloader running on port ${PORT}`
