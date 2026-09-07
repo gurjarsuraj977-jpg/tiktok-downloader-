@@ -80,7 +80,6 @@ function cleanupDirectory(directory) {
 }
 
 app.post("/api/download", async (req, res) => {
-
     const { url } = req.body || {};
 
     if (!url || typeof url !== "string") {
@@ -100,9 +99,11 @@ app.post("/api/download", async (req, res) => {
     const job = createJobDirectory();
 
     try {
-
         await ytdlp(url.trim(), {
-            output: path.join(job.directory, "%(title).100s.%(ext)s"),
+            output: path.join(
+                job.directory,
+                "%(title).100s.%(ext)s"
+            ),
             format: "best[ext=mp4]/best",
             noPlaylist: true,
             noWarnings: true,
@@ -114,7 +115,9 @@ app.post("/api/download", async (req, res) => {
         const filename = findVideoFile(job.directory);
 
         if (!filename) {
-            throw new Error("No video file was produced.");
+            throw new Error(
+                "No video file was produced."
+            );
         }
 
         const filePath = path.join(
@@ -129,7 +132,8 @@ app.post("/api/download", async (req, res) => {
 
             return res.status(413).json({
                 ok: false,
-                error: "This video is larger than the 200 MB limit."
+                error:
+                    "This video is larger than the 200 MB limit."
             });
         }
 
@@ -140,78 +144,99 @@ app.post("/api/download", async (req, res) => {
         return res.json({
             ok: true,
             filename,
-            downloadUrl: `/api/file/${job.id}/${encodeURIComponent(filename)}`
+            downloadUrl:
+                `/api/file/${job.id}/${encodeURIComponent(filename)}`
         });
 
- } catch (error) {
+    } catch (error) {
 
-    console.error("DOWNLOAD ERROR:", error);
-    console.error("ERROR MESSAGE:", error.message);
-    console.error("ERROR STDERR:", error.stderr);
+        console.error(
+            "DOWNLOAD ERROR:",
+            error
+        );
 
-    cleanupDirectory(job.directory);
+        console.error(
+            "ERROR MESSAGE:",
+            error.message
+        );
 
-    return res.status(500).json({
-        ok: false,
-        error:
-            "Unable to process this video. Make sure the TikTok video is publicly accessible and the URL is correct."
-    });
-}
+        console.error(
+            "ERROR STDERR:",
+            error.stderr
+        );
 
-app.get("/api/file/:jobId/:filename", (req, res) => {
+        cleanupDirectory(job.directory);
 
-    const { jobId } = req.params;
-
-    const filename = decodeURIComponent(req.params.filename);
-
-    if (!/^[a-f0-9]{32}$/.test(jobId)) {
-        return res.status(400).send("Invalid request.");
+        return res.status(500).json({
+            ok: false,
+            error:
+                "Unable to process this video. Make sure the TikTok video is publicly accessible and the URL is correct."
+        });
     }
+});
 
-    const jobDirectory = path.join(
-        DOWNLOAD_DIR,
-        jobId
-    );
+app.get(
+    "/api/file/:jobId/:filename",
+    (req, res) => {
 
-    const filePath = path.join(
-        jobDirectory,
-        filename
-    );
+        const { jobId } = req.params;
 
-    const resolvedDirectory =
-        path.resolve(jobDirectory);
+        const filename =
+            decodeURIComponent(req.params.filename);
 
-    const resolvedFile =
-        path.resolve(filePath);
+        if (!/^[a-f0-9]{32}$/.test(jobId)) {
+            return res.status(400).send(
+                "Invalid request."
+            );
+        }
 
-    if (
-        !resolvedFile.startsWith(
-            resolvedDirectory + path.sep
-        )
-    ) {
-        return res.status(400).send("Invalid file path.");
-    }
+        const jobDirectory = path.join(
+            DOWNLOAD_DIR,
+            jobId
+        );
 
-    if (!fs.existsSync(resolvedFile)) {
-        return res.status(404).send(
-            "File expired or no longer exists."
+        const filePath = path.join(
+            jobDirectory,
+            filename
+        );
+
+        const resolvedDirectory =
+            path.resolve(jobDirectory);
+
+        const resolvedFile =
+            path.resolve(filePath);
+
+        if (
+            !resolvedFile.startsWith(
+                resolvedDirectory + path.sep
+            )
+        ) {
+            return res.status(400).send(
+                "Invalid file path."
+            );
+        }
+
+        if (!fs.existsSync(resolvedFile)) {
+            return res.status(404).send(
+                "File expired or no longer exists."
+            );
+        }
+
+        res.download(
+            resolvedFile,
+            filename,
+            error => {
+
+                if (error) {
+                    console.error(
+                        "File download error:",
+                        error.message
+                    );
+                }
+            }
         );
     }
-
-    res.download(
-        resolvedFile,
-        filename,
-        error => {
-
-            if (error) {
-                console.error(
-                    "File download error:",
-                    error.message
-                );
-            }
-        }
-    );
-});
+);
 
 app.listen(PORT, () => {
     console.log(
