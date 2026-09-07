@@ -1,64 +1,79 @@
 const { TeraBoxApp } = require("@cfbeg/terabox-api");
 
 const ndus =
-    String(process.env.TERABOX_NDUS || "").trim();
+    String(
+        process.env.TERABOX_NDUS || ""
+    ).trim();
 
 async function main() {
+
     if (!ndus) {
-        throw new Error("TERABOX_NDUS missing");
+        throw new Error(
+            "TERABOX_NDUS is missing."
+        );
     }
 
     const tb =
-        new TeraBoxApp(ndus, "ndus");
+        new TeraBoxApp(
+            ndus,
+            "ndus"
+        );
 
-    await tb.checkLogin();
+    const login =
+        await tb.checkLogin();
 
     console.log(
-        "Available methods:"
+        "LOGIN ERRNO:",
+        login?.errno
+    );
+
+    if (
+        !login ||
+        Number(login.errno) !== 0
+    ) {
+        throw new Error(
+            "TeraBox login failed."
+        );
+    }
+
+    const methods =
+        Object.getOwnPropertyNames(
+            Object.getPrototypeOf(tb)
+        );
+
+    console.log(
+        "HAS doReq:",
+        methods.includes("doReq")
     );
 
     console.log(
-        Object.getOwnPropertyNames(
-            Object.getPrototypeOf(tb)
+        "SESSION KEYS:",
+        Object.keys(
+            tb.data || {}
         )
     );
 
     console.log(
-        "Internal data keys:"
-    );
-
-    console.log(
-        Object.keys(tb.data || {})
-    );
-
-    console.log(
-        "Session hostname:"
-    );
-
-    console.log(
-        tb.host ||
-        tb.hostname ||
-        tb.data?.host ||
-        "not exposed"
-    );
-
-    console.log(
-        "Has shortUrlInfo:",
-        typeof tb.shortUrlInfo
-    );
-
-    console.log(
-        "Has doReq:",
+        "doReq type:",
         typeof tb.doReq
     );
+
+    /*
+     * We deliberately do NOT print tb.data values.
+     * They contain session credentials/tokens.
+     */
+
 }
 
 main().catch(
     error => {
+
         console.error(
+            "TEST FAILED:",
             error.message
         );
 
         process.exit(1);
+
     }
 );
