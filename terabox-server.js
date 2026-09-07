@@ -174,14 +174,15 @@ async function resolveTeraBox(url) {
         );
     }
 
-    const jsToken =
-        extractJsToken(page.text);
+const jsToken =
+    process.env.TERABOX_JSTOKEN ||
+    extractJsToken(page.text);
 
-    if (!jsToken) {
-        throw new Error(
-            "TeraBox blocked automatic jsToken extraction. Add TERABOX_COOKIE in Render."
-        );
-    }
+if (!jsToken) {
+    throw new Error(
+        "No TeraBox jsToken available. Add TERABOX_JSTOKEN in Render."
+    );
+}
 
     const dpLogId =
         extractDpLogId(page.text);
