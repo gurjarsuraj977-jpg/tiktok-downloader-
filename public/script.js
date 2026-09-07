@@ -54,6 +54,7 @@ function showStatus(message) {
 function hideStatus() {
 
     statusBox.classList.add("hidden");
+
 }
 
 
@@ -62,6 +63,9 @@ function hideResult() {
     resultBox.classList.add("hidden");
 
     downloadLink.href = "#";
+
+    downloadLink.removeAttribute("download");
+
 }
 
 
@@ -79,6 +83,8 @@ downloadBtn.addEventListener(
             showStatus(
                 "Paste a TikTok URL first."
             );
+
+            urlInput.focus();
 
             return;
         }
@@ -103,13 +109,27 @@ downloadBtn.addEventListener(
                         },
 
                         body: JSON.stringify({
-                            url
+                            url: url
                         })
                     }
                 );
 
-            const data =
-                await response.json();
+
+            let data;
+
+            try {
+
+                data =
+                    await response.json();
+
+            } catch {
+
+                throw new Error(
+                    "The server returned an invalid response."
+                );
+
+            }
+
 
             if (
                 !response.ok ||
@@ -120,24 +140,67 @@ downloadBtn.addEventListener(
                     data.error ||
                     "Download failed."
                 );
+
             }
 
-            hideStatus();
+
+            if (!data.downloadUrl) {
+
+                throw new Error(
+                    "The server did not provide a download link."
+                );
+
+            }
+
 
             filenameBox.textContent =
-                data.filename;
+                data.filename ||
+                "TikTok video.mp4";
+
 
             downloadLink.href =
                 data.downloadUrl;
 
+
             downloadLink.setAttribute(
                 "download",
-                data.filename
+                data.filename ||
+                "TikTok-video.mp4"
             );
+
 
             resultBox.classList.remove(
                 "hidden"
             );
+
+
+            hideStatus();
+
+
+            // Automatically start the MP4 download
+            const downloadUrl =
+                data.downloadUrl;
+
+            const temporaryLink =
+                document.createElement("a");
+
+            temporaryLink.href =
+                downloadUrl;
+
+            temporaryLink.setAttribute(
+                "download",
+                data.filename ||
+                "TikTok-video.mp4"
+            );
+
+            document.body.appendChild(
+                temporaryLink
+            );
+
+            temporaryLink.click();
+
+            temporaryLink.remove();
+
 
         } catch (error) {
 
@@ -146,11 +209,13 @@ downloadBtn.addEventListener(
                 "Something went wrong."
             );
 
+
         } finally {
 
             setLoading(false);
 
         }
+
     }
 );
 
@@ -160,6 +225,8 @@ urlInput.addEventListener(
     event => {
 
         if (event.key === "Enter") {
+
+            event.preventDefault();
 
             downloadBtn.click();
 
