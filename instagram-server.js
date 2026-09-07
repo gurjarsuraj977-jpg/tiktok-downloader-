@@ -11,76 +11,29 @@ const ffmpegPath = require("ffmpeg-static");
 
 const app = express();
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
+
 const DOWNLOAD_DIR = path.join(__dirname, "instagram-downloads");
+const TEMP_DIR = path.join(__dirname, "instagram-temp");
 
 const MAX_FILE_SIZE = 200 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT = 120000;
-const PROCESS_TIMEOUT = 180000;
+
 const FILE_EXPIRY = 5 * 60 * 1000;
 const JOB_EXPIRY = 10 * 60 * 1000;
 
-app.use(express.json({ limit: "1mb" }));
-
-/* =========================================================
-   JOB STORAGE
-========================================================= */
-
 const jobs = new Map();
 
-/* =========================================================
-   CREATE DOWNLOAD DIRECTORY
-========================================================= */
+app.use(express.json());
 
 if (!fs.existsSync(DOWNLOAD_DIR)) {
     fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
 
-/* =========================================================
-   JOB HELPERS
-========================================================= */
-
-function createJob() {
-    const id = crypto.randomBytes(16).toString("hex");
-
-    const job = {
-        id,
-        status: "starting",
-        progress: 0,
-        message: "Starting...",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        files: [],
-        error: null
-    };
-
-    jobs.set(id, job);
-
-    return job;
+if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
 
-function updateJob(job, status, progress, message) {
-    job.status = status;
-    job.progress = Math.max(0, Math.min(100, progress));
-    job.message = message;
-    job.updatedAt = Date.now();
-}
-
-function failJob(job, message) {
-    job.status = "error";
-    job.progress = 0;
-    job.message = message;
-    job.error = message;
-    job.updatedAt = Date.now();
-}
-
-function completeJob(job, files) {
-    job.status = "completed";
-    job.progress = 100;
-    job.message = "Your media is ready!";
-    job.files = files;
-    job.updatedAt = Date.now();
-}
 
 /* =========================================================
    URL VALIDATION
@@ -89,7 +42,6 @@ function completeJob(job, files) {
 function isInstagramUrl(value) {
     try {
         const parsed = new URL(value);
-
         const hostname = parsed.hostname.toLowerCase();
 
         return (
@@ -102,761 +54,712 @@ function isInstagramUrl(value) {
     }
 }
 
+
 /* =========================================================
-   FIND MEDIA URLS IN API RESPONSE
+   FILE HELPERS
 ========================================================= */
 
-function collectMediaUrls(value, results = new Set(), depth = 0) {
-
-    if (depth > 12 || value === null || value === undefined) {
-        return results;
-    }
-
-    if (typeof value === "string") {
-
-        if (
-            value.startsWith("http://") ||
-            value.startsWith("https://")
-        ) {
-
-            const lower = value.toLowerCase();
-
-            const looksLikeMedia =
-                lower.includes(".mp4") ||
-                lower.includes(".m4v") ||
-                lower.includes(".mov") ||
-                lower.includes(".webm") ||
-                lower.includes(".jpg") ||
-                lower.includes(".jpeg") ||
-                lower.includes(".png") ||
-                lower.includes(".webp") ||
-                lower.includes(".heic") ||
-                lower.includes("video") ||
-                lower.includes("image");
-
-            if (looksLikeMedia) {
-                results.add(value);
-            }
+function safeUnlink(filePath) {
+    try {
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
         }
-
-        return results;
-    }
-
-    if (Array.isArray(value)) {
-
-        for (const item of value) {
-            collectMediaUrls(
-                item,
-                results,
-                depth + 1
-            );
-        }
-
-        return results;
-    }
-
-    if (typeof value === "object") {
-
-        for (const key of Object.keys(value)) {
-
-            collectMediaUrls(
-                value[key],
-                results,
-                depth + 1
-            );
-
-        }
-    }
-
-    return results;
+    } catch {}
 }
 
+
+function getExtensionFromContentType(contentType) {
+    if (!contentType) {
+        return ".mp4";
+    }
+
+    const type = contentType.toLowerCase();
+
+    if (type.includes("image/jpeg")) {
+        return ".jpg";
+    }
+
+    if (type.includes("image/png")) {
+        return ".png";
+    }
+
+    if (type.includes("image/webp")) {
+        return ".webp";
+    }
+
+    if (type.includes("image/gif")) {
+        return ".gif";
+    }
+
+    if (type.includes("video/mp4")) {
+        return ".mp4";
+    }
+
+    if (type.includes("video/webm")) {
+        return ".webm";
+    }
+
+    if (type.includes("video/quicktime")) {
+        return ".mov";
+    }
+
+    return ".mp4";
+}
+
+
 /* =========================================================
-   DOWNLOAD MEDIA
+   DOWNLOAD REMOTE FILE
 ========================================================= */
 
-function downloadFile(url, outputPath, onProgress) {
-
+function downloadFile(url, outputPath) {
     return new Promise((resolve, reject) => {
+        let finished = false;
 
-        let settled = false;
+        function fail(error) {
+            if (finished) {
+                return;
+            }
 
-        function finishError(error) {
+            finished = true;
 
-            if (settled) return;
-
-            settled = true;
-
-            try {
-                fs.unlinkSync(outputPath);
-            } catch {}
+            safeUnlink(outputPath);
 
             reject(error);
         }
 
-        function finishSuccess(size) {
+        function complete(result) {
+            if (finished) {
+                return;
+            }
 
-            if (settled) return;
-
-            settled = true;
-
-            resolve({
-                size
-            });
+            finished = true;
+            resolve(result);
         }
 
-        function requestUrl(currentUrl, redirectCount = 0) {
+        let parsedUrl;
 
-            if (redirectCount > 5) {
-                return finishError(
-                    new Error(
-                        "Too many redirects from Instagram media server."
-                    )
-                );
-            }
+        try {
+            parsedUrl = new URL(url);
+        } catch {
+            return fail(new Error("Invalid media URL."));
+        }
 
-            let parsedUrl;
+        const protocol =
+            parsedUrl.protocol === "https:"
+                ? https
+                : http;
 
-            try {
-                parsedUrl = new URL(currentUrl);
-            } catch {
-                return finishError(
-                    new Error("Invalid media URL.")
-                );
-            }
+        const request = protocol.get(
+            url,
+            {
+                headers: {
+                    "User-Agent":
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
 
-            const protocol =
-                parsedUrl.protocol === "https:"
-                    ? https
-                    : http;
+                    "Accept":
+                        "*/*",
 
-            const request = protocol.get(
-                currentUrl,
-                {
-                    headers: {
-                        "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
-                        "Accept": "*/*"
-                    },
-                    timeout: DOWNLOAD_TIMEOUT
+                    "Accept-Encoding":
+                        "identity"
                 },
-                response => {
 
-                    /* ==============================
-                       REDIRECT
-                    ============================== */
+                timeout: DOWNLOAD_TIMEOUT
+            },
 
-                    if (
-                        response.statusCode >= 300 &&
-                        response.statusCode < 400 &&
-                        response.headers.location
-                    ) {
+            response => {
 
-                        response.resume();
+                if (
+                    response.statusCode >= 300 &&
+                    response.statusCode < 400 &&
+                    response.headers.location
+                ) {
+                    response.resume();
 
-                        const nextUrl =
-                            new URL(
-                                response.headers.location,
-                                currentUrl
-                            ).toString();
+                    return downloadFile(
+                        response.headers.location,
+                        outputPath
+                    )
+                        .then(complete)
+                        .catch(fail);
+                }
 
-                        return requestUrl(
-                            nextUrl,
-                            redirectCount + 1
-                        );
-                    }
 
-                    /* ==============================
-                       HTTP ERROR
-                    ============================== */
+                if (
+                    response.statusCode < 200 ||
+                    response.statusCode >= 300
+                ) {
+                    response.resume();
 
-                    if (
-                        response.statusCode < 200 ||
-                        response.statusCode >= 300
-                    ) {
+                    return fail(
+                        new Error(
+                            "Media server returned HTTP " +
+                            response.statusCode
+                        )
+                    );
+                }
 
-                        response.resume();
 
-                        return finishError(
-                            new Error(
-                                `Media server returned HTTP ${response.statusCode}`
-                            )
-                        );
-                    }
+                const contentLength =
+                    Number(
+                        response.headers["content-length"]
+                    ) || 0;
 
-                    const contentLength =
-                        Number(
-                            response.headers["content-length"]
-                        ) || 0;
 
-                    if (
-                        contentLength &&
-                        contentLength > MAX_FILE_SIZE
-                    ) {
+                if (
+                    contentLength &&
+                    contentLength > MAX_FILE_SIZE
+                ) {
+                    response.resume();
 
-                        response.resume();
+                    return fail(
+                        new Error(
+                            "Instagram media is larger than the 200 MB limit."
+                        )
+                    );
+                }
 
-                        return finishError(
-                            new Error(
-                                "Instagram media is larger than the 200 MB limit."
-                            )
-                        );
-                    }
 
-                    const file =
-                        fs.createWriteStream(
-                            outputPath
-                        );
+                const contentType =
+                    response.headers["content-type"] || "";
 
-                    let downloadedBytes = 0;
 
-                    response.on("data", chunk => {
+                const file =
+                    fs.createWriteStream(outputPath);
 
-                        downloadedBytes += chunk.length;
+
+                let downloadedBytes = 0;
+
+
+                response.on(
+                    "data",
+                    chunk => {
+
+                        downloadedBytes +=
+                            chunk.length;
+
 
                         if (
                             downloadedBytes >
                             MAX_FILE_SIZE
                         ) {
-
                             response.destroy();
-
                             file.destroy();
 
-                            finishError(
+                            return fail(
                                 new Error(
                                     "Downloaded file exceeded the 200 MB limit."
                                 )
                             );
-
-                            return;
                         }
+                    }
+                );
 
-                        if (contentLength > 0) {
 
-                            const percent =
-                                Math.round(
-                                    (
-                                        downloadedBytes /
-                                        contentLength
-                                    ) * 100
-                                );
+                response.pipe(file);
 
-                            if (onProgress) {
-                                onProgress(
-                                    Math.min(
-                                        99,
-                                        percent
-                                    )
-                                );
-                            }
-                        }
-                    });
 
-                    response.pipe(file);
+                file.on(
+                    "finish",
+                    () => {
 
-                    file.on("finish", () => {
+                        file.close(
+                            () => {
 
-                        file.close(() => {
+                                try {
 
-                            if (settled) {
-                                return;
-                            }
-
-                            try {
-
-                                const size =
-                                    fs.statSync(
-                                        outputPath
-                                    ).size;
-
-                                if (size <= 0) {
-
-                                    return finishError(
-                                        new Error(
-                                            "Downloaded file is empty."
+                                    if (
+                                        !fs.existsSync(
+                                            outputPath
                                         )
-                                    );
+                                    ) {
+                                        return fail(
+                                            new Error(
+                                                "Downloaded file was not created."
+                                            )
+                                        );
+                                    }
 
+
+                                    const stats =
+                                        fs.statSync(
+                                            outputPath
+                                        );
+
+
+                                    if (
+                                        stats.size <= 0
+                                    ) {
+                                        return fail(
+                                            new Error(
+                                                "Downloaded file is empty."
+                                            )
+                                        );
+                                    }
+
+
+                                    complete({
+                                        size:
+                                            stats.size,
+
+                                        contentType:
+                                            contentType
+                                    });
+
+                                } catch (
+                                    error
+                                ) {
+                                    fail(error);
                                 }
-
-                                if (onProgress) {
-                                    onProgress(100);
-                                }
-
-                                finishSuccess(size);
-
-                            } catch (error) {
-                                finishError(error);
                             }
-
-                        });
-
-                    });
-
-                    file.on("error", error => {
-                        finishError(error);
-                    });
-
-                }
-            );
-
-            request.on("timeout", () => {
-
-                request.destroy();
-
-                finishError(
-                    new Error(
-                        "Instagram media download timed out."
-                    )
+                        );
+                    }
                 );
 
-            });
 
-            request.on("error", error => {
-                finishError(error);
-            });
-        }
-
-        requestUrl(url);
-    });
-}
-
-/* =========================================================
-   DETECT MEDIA TYPE
-========================================================= */
-
-function detectMediaType(url, contentType = "") {
-
-    const lowerUrl =
-        String(url || "").toLowerCase();
-
-    const lowerType =
-        String(contentType || "").toLowerCase();
-
-    if (
-        lowerType.includes("image") ||
-        lowerUrl.includes(".jpg") ||
-        lowerUrl.includes(".jpeg") ||
-        lowerUrl.includes(".png") ||
-        lowerUrl.includes(".webp") ||
-        lowerUrl.includes(".heic")
-    ) {
-        return "image";
-    }
-
-    return "video";
-}
-
-/* =========================================================
-   RUN FFMPEG
-========================================================= */
-
-function runFfmpeg(inputPath, outputPath, job, baseProgress) {
-
-    return new Promise((resolve, reject) => {
-
-        if (!ffmpegPath) {
-            return reject(
-                new Error(
-                    "FFmpeg is not available on this server."
-                )
-            );
-        }
-
-        const args = [
-            "-y",
-            "-i",
-            inputPath,
-
-            "-c:v",
-            "libx264",
-
-            "-preset",
-            "veryfast",
-
-            "-crf",
-            "23",
-
-            "-pix_fmt",
-            "yuv420p",
-
-            "-c:a",
-            "aac",
-
-            "-b:a",
-            "128k",
-
-            "-movflags",
-            "+faststart",
-
-            outputPath
-        ];
-
-        console.log(
-            "Running FFmpeg:"
-        );
-
-        console.log(
-            ffmpegPath,
-            args.join(" ")
-        );
-
-        const process =
-            spawn(
-                ffmpegPath,
-                args,
-                {
-                    stdio: [
-                        "ignore",
-                        "ignore",
-                        "pipe"
-                    ]
-                }
-            );
-
-        let stderr = "";
-
-        let finished = false;
-
-        const timeout =
-            setTimeout(() => {
-
-                if (finished) return;
-
-                try {
-                    process.kill("SIGKILL");
-                } catch {}
-
-                finished = true;
-
-                reject(
-                    new Error(
-                        "Video conversion timed out."
-                    )
+                file.on(
+                    "error",
+                    error => {
+                        fail(error);
+                    }
                 );
-
-            }, PROCESS_TIMEOUT);
-
-        process.stderr.on(
-            "data",
-            data => {
-
-                stderr +=
-                    data.toString();
-
-                const match =
-                    stderr.match(
-                        /time=(\d+):(\d+):(\d+(?:\.\d+)?)/g
-                    );
-
-                if (match && job) {
-
-                    updateJob(
-                        job,
-                        "processing",
-                        Math.min(
-                            99,
-                            baseProgress + 10
-                        ),
-                        "Optimizing video for maximum compatibility..."
-                    );
-
-                }
             }
         );
 
-        process.on(
+
+        request.on(
+            "timeout",
+            () => {
+
+                request.destroy(
+                    new Error(
+                        "Instagram download timed out."
+                    )
+                );
+            }
+        );
+
+
+        request.on(
             "error",
             error => {
-
-                if (finished) return;
-
-                clearTimeout(timeout);
-
-                finished = true;
-
-                reject(error);
-
-            }
-        );
-
-        process.on(
-            "close",
-            code => {
-
-                if (finished) return;
-
-                clearTimeout(timeout);
-
-                finished = true;
-
-                if (code !== 0) {
-
-                    console.error(
-                        "FFmpeg error:",
-                        stderr
-                    );
-
-                    return reject(
-                        new Error(
-                            "Video compatibility conversion failed."
-                        )
-                    );
-
-                }
-
-                if (!fs.existsSync(outputPath)) {
-
-                    return reject(
-                        new Error(
-                            "FFmpeg did not create the converted video."
-                        )
-                    );
-
-                }
-
-                resolve();
-
+                fail(error);
             }
         );
     });
 }
 
+
 /* =========================================================
-   PROCESS VIDEO
+   MEDIA URL EXTRACTION
 ========================================================= */
 
-async function processVideo(
-    inputPath,
-    outputPath,
-    job,
-    baseProgress
-) {
-
-    updateJob(
-        job,
-        "processing",
-        baseProgress,
-        "Optimizing video for compatibility..."
+function looksLikeHttpUrl(value) {
+    return (
+        typeof value === "string" &&
+        /^https?:\/\//i.test(value)
     );
-
-    await runFfmpeg(
-        inputPath,
-        outputPath,
-        job,
-        baseProgress
-    );
-
-    try {
-        fs.unlinkSync(inputPath);
-    } catch {}
-
-    return fs.statSync(
-        outputPath
-    ).size;
 }
 
-/* =========================================================
-   CLEAN OLD FILES
-========================================================= */
 
-function cleanupExpiredFiles() {
-
-    if (!fs.existsSync(DOWNLOAD_DIR)) {
+function collectMediaUrls(
+    value,
+    keyName,
+    output,
+    seen
+) {
+    if (!value) {
         return;
     }
 
-    const now =
-        Date.now();
 
-    for (
-        const fileName of
-        fs.readdirSync(DOWNLOAD_DIR)
-    ) {
-
-        const filePath =
-            path.join(
-                DOWNLOAD_DIR,
-                fileName
-            );
-
-        try {
-
-            const stats =
-                fs.statSync(
-                    filePath
-                );
-
-            if (
-                now -
-                stats.mtimeMs >
-                FILE_EXPIRY
-            ) {
-
-                fs.unlinkSync(
-                    filePath
-                );
-
-                console.log(
-                    "Deleted expired file:",
-                    fileName
-                );
-            }
-
-        } catch {}
-
-    }
-}
-
-/* =========================================================
-   CLEAN OLD JOBS
-========================================================= */
-
-function cleanupOldJobs() {
-
-    const now =
-        Date.now();
-
-    for (
-        const [id, job]
-        of jobs.entries()
+    if (
+        typeof value === "string"
     ) {
 
         if (
-            now -
-            job.updatedAt >
-            JOB_EXPIRY
+            looksLikeHttpUrl(value)
         ) {
 
-            jobs.delete(id);
+            const key =
+                String(
+                    keyName || ""
+                ).toLowerCase();
 
+
+            const mediaKey =
+                key.includes("url") ||
+                key.includes("video") ||
+                key.includes("image") ||
+                key.includes("media") ||
+                key.includes("download") ||
+                key.includes("src") ||
+                key.includes("photo") ||
+                key.includes("thumbnail");
+
+
+            const obviousMedia =
+                /\.(mp4|m4v|mov|webm|jpg|jpeg|png|webp)(\?|$)/i
+                    .test(value) ||
+
+                value.includes("fbcdn") ||
+
+                value.includes("cdninstagram");
+
+
+            if (
+                mediaKey ||
+                obviousMedia
+            ) {
+                if (
+                    !seen.has(value)
+                ) {
+                    seen.add(value);
+                    output.push(value);
+                }
+            }
         }
 
+        return;
+    }
+
+
+    if (
+        Array.isArray(value)
+    ) {
+
+        for (
+            const item of value
+        ) {
+
+            collectMediaUrls(
+                item,
+                keyName,
+                output,
+                seen
+            );
+        }
+
+        return;
+    }
+
+
+    if (
+        typeof value === "object"
+    ) {
+
+        for (
+            const key of Object.keys(value)
+        ) {
+
+            collectMediaUrls(
+                value[key],
+                key,
+                output,
+                seen
+            );
+        }
     }
 }
 
-setInterval(
-    cleanupExpiredFiles,
-    60 * 1000
-);
 
-setInterval(
-    cleanupOldJobs,
-    60 * 1000
-);
+function extractMediaUrls(result) {
+
+    const urls = [];
+    const seen = new Set();
+
+
+    /*
+       These are the most important known locations
+       from @jerrycoder/instagram-api.
+    */
+
+    if (
+        result &&
+        result.data &&
+        typeof result.data.url === "string"
+    ) {
+
+        if (
+            looksLikeHttpUrl(
+                result.data.url
+            )
+        ) {
+            seen.add(
+                result.data.url
+            );
+
+            urls.push(
+                result.data.url
+            );
+        }
+    }
+
+
+    if (
+        result &&
+        typeof result.url === "string"
+    ) {
+
+        if (
+            looksLikeHttpUrl(
+                result.url
+            ) &&
+            !seen.has(result.url)
+        ) {
+
+            seen.add(
+                result.url
+            );
+
+            urls.push(
+                result.url
+            );
+        }
+    }
+
+
+    /*
+       Search the rest of the response
+       for carousel/media URLs.
+    */
+
+    collectMediaUrls(
+        result,
+        "",
+        urls,
+        seen
+    );
+
+
+    return urls.slice(0, 20);
+}
+
 
 /* =========================================================
-   HEALTH CHECK
+   FFMPEG
 ========================================================= */
 
-app.get(
-    "/api/health",
-    (req, res) => {
+function convertVideoToMp4(
+    inputPath,
+    outputPath,
+    job
+) {
 
-        res.json({
-            ok: true,
-            service: "Instagram Downloader",
-            status: "running"
-        });
+    return new Promise(
+        (resolve, reject) => {
 
-    }
-);
+            if (!ffmpegPath) {
+                return reject(
+                    new Error(
+                        "FFmpeg is not available."
+                    )
+                );
+            }
+
+
+            job.status =
+                "converting";
+
+            job.progress = 70;
+
+
+            const args = [
+                "-y",
+
+                "-i",
+                inputPath,
+
+                "-c:v",
+                "libx264",
+
+                "-preset",
+                "veryfast",
+
+                "-crf",
+                "23",
+
+                "-c:a",
+                "aac",
+
+                "-b:a",
+                "128k",
+
+                "-movflags",
+                "+faststart",
+
+                "-pix_fmt",
+                "yuv420p",
+
+                outputPath
+            ];
+
+
+            console.log(
+                "Starting FFmpeg conversion..."
+            );
+
+
+            const ffmpeg =
+                spawn(
+                    ffmpegPath,
+                    args,
+                    {
+                        stdio: [
+                            "ignore",
+                            "ignore",
+                            "pipe"
+                        ]
+                    }
+                );
+
+
+            let stderr = "";
+
+
+            ffmpeg.stderr.on(
+                "data",
+                chunk => {
+
+                    stderr +=
+                        chunk.toString();
+
+                    /*
+                       FFmpeg progress is not always
+                       available in a simple percentage.
+                       We keep the UI moving during conversion.
+                    */
+
+                    if (
+                        job.progress < 90
+                    ) {
+                        job.progress += 1;
+                    }
+                }
+            );
+
+
+            ffmpeg.on(
+                "error",
+                error => {
+                    reject(error);
+                }
+            );
+
+
+            ffmpeg.on(
+                "close",
+                code => {
+
+                    if (
+                        code !== 0
+                    ) {
+
+                        return reject(
+                            new Error(
+                                "FFmpeg conversion failed: " +
+                                stderr.slice(-500)
+                            )
+                        );
+                    }
+
+
+                    if (
+                        !fs.existsSync(
+                            outputPath
+                        )
+                    ) {
+
+                        return reject(
+                            new Error(
+                                "FFmpeg did not create the MP4 file."
+                            )
+                        );
+                    }
+
+
+                    const stats =
+                        fs.statSync(
+                            outputPath
+                        );
+
+
+                    if (
+                        stats.size <= 0
+                    ) {
+
+                        return reject(
+                            new Error(
+                                "Converted MP4 file is empty."
+                            )
+                        );
+                    }
+
+
+                    job.progress =
+                        95;
+
+
+                    resolve({
+                        size:
+                            stats.size
+                    });
+                }
+            );
+        }
+    );
+}
+
 
 /* =========================================================
-   START DOWNLOAD JOB
-========================================================= */
-
-app.post(
-    "/api/download",
-    async (req, res) => {
-
-        const url =
-            typeof req.body.url === "string"
-                ? req.body.url.trim()
-                : "";
-
-        if (!url) {
-
-            return res.status(400).json({
-                ok: false,
-                error:
-                    "Please provide an Instagram URL."
-            });
-
-        }
-
-        if (!isInstagramUrl(url)) {
-
-            return res.status(400).json({
-                ok: false,
-                error:
-                    "Please provide a valid Instagram URL."
-            });
-
-        }
-
-        const job =
-            createJob();
-
-        updateJob(
-            job,
-            "fetching",
-            5,
-            "Fetching Instagram media..."
-        );
-
-        res.status(202).json({
-            ok: true,
-            jobId: job.id
-        });
-
-        processInstagramJob(
-            job,
-            url
-        );
-
-    }
-);
-
-/* =========================================================
-   PROCESS INSTAGRAM JOB
+   JOB PROCESSING
 ========================================================= */
 
 async function processInstagramJob(
-    job,
-    url
+    jobId,
+    instagramUrl
 ) {
 
+    const job =
+        jobs.get(jobId);
+
+
+    if (!job) {
+        return;
+    }
+
+
     try {
+
+        job.status =
+            "fetching";
+
+        job.progress =
+            5;
+
+        job.message =
+            "Fetching Instagram media...";
+
 
         console.log("");
         console.log(
             "================================="
         );
         console.log(
-            "Instagram download job:",
-            job.id
+            "Instagram download request"
         );
         console.log(
             "================================="
         );
-
-        console.log(url);
-
-        /* =========================================
-           FETCH INSTAGRAM INFORMATION
-        ========================================= */
-
-        updateJob(
-            job,
-            "fetching",
-            10,
-            "Connecting to Instagram..."
+        console.log(
+            instagramUrl
         );
 
+
         const result =
-            await instagram(url);
+            await instagram(
+                instagramUrl
+            );
+
 
         console.log(
             "Instagram API response:"
@@ -870,63 +773,18 @@ async function processInstagramJob(
             )
         );
 
-        /* =========================================
-           FIND MEDIA URLS
-        ========================================= */
 
-        let mediaUrls =
-            Array.from(
-                collectMediaUrls(
-                    result
-                )
+        const mediaUrls =
+            extractMediaUrls(
+                result
             );
 
-        /* =========================================
-           FALLBACKS
-        ========================================= */
 
-        if (
-            mediaUrls.length === 0 &&
-            result &&
-            result.data &&
-            typeof result.data.url === "string"
-        ) {
+        console.log(
+            "Media URLs found:",
+            mediaUrls.length
+        );
 
-            mediaUrls = [
-                result.data.url
-            ];
-
-        }
-
-        if (
-            mediaUrls.length === 0 &&
-            result &&
-            typeof result.url === "string"
-        ) {
-
-            mediaUrls = [
-                result.url
-            ];
-
-        }
-
-        /* =========================================
-           REMOVE DUPLICATES
-        ========================================= */
-
-        mediaUrls =
-            Array.from(
-                new Set(
-                    mediaUrls
-                )
-            );
-
-        /* Limit carousel extraction to 20 items */
-        mediaUrls =
-            mediaUrls.slice(
-                0,
-                20
-            );
 
         if (
             mediaUrls.length === 0
@@ -935,19 +793,27 @@ async function processInstagramJob(
             throw new Error(
                 "Instagram API did not return a downloadable media URL."
             );
-
         }
 
-        console.log(
-            "Media URLs found:",
-            mediaUrls.length
-        );
 
-        /* =========================================
-           DOWNLOAD MEDIA
-        ========================================= */
+        job.total =
+            mediaUrls.length;
+
+
+        job.status =
+            "downloading";
+
+
+        job.progress =
+            10;
+
 
         const files = [];
+
+
+        /*
+           Download every discovered media item.
+        */
 
         for (
             let i = 0;
@@ -955,220 +821,563 @@ async function processInstagramJob(
             i++
         ) {
 
-            const mediaUrl =
-                mediaUrls[i];
-
             const itemNumber =
                 i + 1;
 
-            const total =
-                mediaUrls.length;
 
-            const downloadStart =
-                15 +
-                (
-                    i /
-                    total
-                ) * 45;
+            job.current =
+                itemNumber;
 
-            updateJob(
-                job,
-                "downloading",
-                Math.round(
-                    downloadStart
-                ),
-                total > 1
-                    ? `Downloading item ${itemNumber} of ${total}...`
-                    : "Downloading media..."
-            );
 
-            const id =
-                crypto
-                    .randomBytes(12)
-                    .toString("hex");
+            job.message =
+                "Downloading item " +
+                itemNumber +
+                " of " +
+                mediaUrls.length +
+                "...";
+
 
             const temporaryName =
-                `instagram-${id}-source`;
+                "temp-" +
+                jobId +
+                "-" +
+                itemNumber;
 
-            const temporaryPath =
+
+            const tempPath =
                 path.join(
-                    DOWNLOAD_DIR,
+                    TEMP_DIR,
                     temporaryName
                 );
 
-            const downloadResult =
+
+            const downloaded =
                 await downloadFile(
-                    mediaUrl,
-                    temporaryPath,
-                    percent => {
-
-                        const progress =
-                            downloadStart +
-                            (
-                                percent /
-                                100
-                            ) * 40 /
-                            total;
-
-                        updateJob(
-                            job,
-                            "downloading",
-                            Math.round(
-                                progress
-                            ),
-                            total > 1
-                                ? `Downloading item ${itemNumber} of ${total}...`
-                                : `Downloading media... ${percent}%`
-                        );
-
-                    }
+                    mediaUrls[i],
+                    tempPath
                 );
 
-            const originalSize =
-                downloadResult.size;
 
-            const type =
-                detectMediaType(
-                    mediaUrl
+            const extension =
+                getExtensionFromContentType(
+                    downloaded.contentType
                 );
 
-            /* =========================================
-               IMAGE
-            ========================================= */
 
-            if (type === "image") {
-
-                const filename =
-                    `instagram-${id}.jpg`;
-
-                const finalPath =
-                    path.join(
-                        DOWNLOAD_DIR,
-                        filename
+            const isImage =
+                downloaded.contentType &&
+                downloaded.contentType
+                    .toLowerCase()
+                    .startsWith(
+                        "image/"
                     );
 
-                fs.renameSync(
-                    temporaryPath,
-                    finalPath
-                );
 
-                files.push({
+            let finalFilename;
 
-                    filename,
 
-                    size:
-                        originalSize,
+            if (
+                isImage
+            ) {
 
-                    type:
-                        "image",
+                finalFilename =
+                    "instagram-" +
+                    jobId +
+                    "-" +
+                    itemNumber +
+                    extension;
 
-                    downloadUrl:
-                        `/api/file/${encodeURIComponent(filename)}`
+            } else {
 
-                });
-
-                continue;
+                finalFilename =
+                    "instagram-" +
+                    jobId +
+                    "-" +
+                    itemNumber +
+                    ".mp4";
             }
 
-            /* =========================================
-               VIDEO
-            ========================================= */
-
-            const filename =
-                `instagram-${id}.mp4`;
 
             const finalPath =
                 path.join(
                     DOWNLOAD_DIR,
-                    filename
+                    finalFilename
                 );
 
-            await processVideo(
-                temporaryPath,
-                finalPath,
-                job,
-                65
-            );
 
-            const finalSize =
-                fs.statSync(
+            /*
+               Convert video to universally compatible
+               H.264/AAC MP4.
+            */
+
+            if (
+                !isImage
+            ) {
+
+                job.status =
+                    "converting";
+
+                job.message =
+                    "Optimizing video " +
+                    itemNumber +
+                    "...";
+
+
+                await convertVideoToMp4(
+                    tempPath,
+                    finalPath,
+                    job
+                );
+
+
+                safeUnlink(
+                    tempPath
+                );
+
+            } else {
+
+                fs.renameSync(
+                    tempPath,
                     finalPath
-                ).size;
+                );
+            }
+
+
+            let finalSize =
+                0;
+
+
+            try {
+
+                finalSize =
+                    fs.statSync(
+                        finalPath
+                    ).size;
+
+            } catch {}
+
 
             files.push({
-
-                filename,
+                filename:
+                    finalFilename,
 
                 size:
                     finalSize,
 
                 type:
-                    "video",
+                    isImage
+                        ? "image"
+                        : "video",
 
                 downloadUrl:
-                    `/api/file/${encodeURIComponent(filename)}`
-
+                    "/api/file/" +
+                    encodeURIComponent(
+                        finalFilename
+                    )
             });
 
+
+            const completedPercent =
+                10 +
+                Math.round(
+                    ((i + 1) /
+                        mediaUrls.length) *
+                    85
+                );
+
+
+            job.progress =
+                Math.min(
+                    completedPercent,
+                    95
+                );
         }
 
-        /* =========================================
-           COMPLETE
-        ========================================= */
 
-        completeJob(
-            job,
-            files
-        );
+        if (
+            files.length === 0
+        ) {
+
+            throw new Error(
+                "No downloadable media was created."
+            );
+        }
+
+
+        job.status =
+            "completed";
+
+        job.progress =
+            100;
+
+        job.message =
+            "Download ready!";
+
+        job.files =
+            files;
+
+        job.filename =
+            files[0].filename;
+
+        job.downloadUrl =
+            files[0].downloadUrl;
+
+        job.finishedAt =
+            Date.now();
+
 
         console.log(
-            "Instagram job completed:",
-            job.id
+            "Instagram download completed."
         );
+
 
     } catch (error) {
 
         console.error(
-            "INSTAGRAM ERROR:",
+            "INSTAGRAM JOB ERROR:"
+        );
+
+        console.error(
             error
         );
 
-        failJob(
-            job,
+
+        job.status =
+            "error";
+
+        job.progress =
+            0;
+
+        job.message =
             error.message ||
-            "Instagram download failed."
-        );
+            "Instagram download failed.";
 
+        job.error =
+            error.message ||
+            "Instagram download failed.";
+
+        job.finishedAt =
+            Date.now();
     }
-
 }
 
+
 /* =========================================================
-   JOB STATUS
+   CLEANUP
+========================================================= */
+
+function cleanupExpiredFiles() {
+
+    const now =
+        Date.now();
+
+
+    if (
+        fs.existsSync(
+            DOWNLOAD_DIR
+        )
+    ) {
+
+        for (
+            const fileName of
+            fs.readdirSync(
+                DOWNLOAD_DIR
+            )
+        ) {
+
+            const filePath =
+                path.join(
+                    DOWNLOAD_DIR,
+                    fileName
+                );
+
+
+            try {
+
+                const stats =
+                    fs.statSync(
+                        filePath
+                    );
+
+
+                if (
+                    now -
+                    stats.mtimeMs >
+                    FILE_EXPIRY
+                ) {
+
+                    fs.unlinkSync(
+                        filePath
+                    );
+
+
+                    console.log(
+                        "Deleted expired file:",
+                        fileName
+                    );
+                }
+
+            } catch {}
+        }
+    }
+
+
+    if (
+        fs.existsSync(
+            TEMP_DIR
+        )
+    ) {
+
+        for (
+            const fileName of
+            fs.readdirSync(
+                TEMP_DIR
+            )
+        ) {
+
+            const filePath =
+                path.join(
+                    TEMP_DIR,
+                    fileName
+                );
+
+
+            try {
+
+                const stats =
+                    fs.statSync(
+                        filePath
+                    );
+
+
+                if (
+                    now -
+                    stats.mtimeMs >
+                    FILE_EXPIRY
+                ) {
+
+                    fs.unlinkSync(
+                        filePath
+                    );
+                }
+
+            } catch {}
+        }
+    }
+
+
+    for (
+        const [
+            jobId,
+            job
+        ] of jobs.entries()
+    ) {
+
+        const created =
+            job.createdAt || now;
+
+
+        if (
+            now -
+            created >
+            JOB_EXPIRY
+        ) {
+
+            jobs.delete(
+                jobId
+            );
+        }
+    }
+}
+
+
+setInterval(
+    cleanupExpiredFiles,
+    60 * 1000
+);
+
+
+/* =========================================================
+   HEALTH
+========================================================= */
+
+app.get(
+    "/api/health",
+    (req, res) => {
+
+        res.json({
+            ok: true,
+            service:
+                "Instagram Downloader",
+            status:
+                "running"
+        });
+    }
+);
+
+
+/* =========================================================
+   MAIN DOWNLOAD API
+========================================================= */
+
+app.post(
+    "/api/download",
+    async (req, res) => {
+
+        try {
+
+            const url =
+                typeof req.body.url === "string"
+                    ? req.body.url.trim()
+                    : "";
+
+
+            if (!url) {
+
+                return res.status(400).json({
+                    ok: false,
+                    error:
+                        "Please provide an Instagram URL."
+                });
+            }
+
+
+            if (
+                !isInstagramUrl(url)
+            ) {
+
+                return res.status(400).json({
+                    ok: false,
+                    error:
+                        "Please provide a valid Instagram URL."
+                });
+            }
+
+
+            const jobId =
+                crypto
+                    .randomBytes(16)
+                    .toString("hex");
+
+
+            const job = {
+
+                id:
+                    jobId,
+
+                status:
+                    "queued",
+
+                progress:
+                    0,
+
+                message:
+                    "Starting download...",
+
+                current:
+                    0,
+
+                total:
+                    1,
+
+                files:
+                    [],
+
+                createdAt:
+                    Date.now()
+            };
+
+
+            jobs.set(
+                jobId,
+                job
+            );
+
+
+            processInstagramJob(
+                jobId,
+                url
+            );
+
+
+            return res.status(202).json({
+
+                ok:
+                    true,
+
+                jobId:
+                    jobId,
+
+                status:
+                    "queued",
+
+                statusUrl:
+                    "/api/status/" +
+                    encodeURIComponent(
+                        jobId
+                    )
+            });
+
+
+        } catch (error) {
+
+            console.error(
+                "DOWNLOAD API ERROR:",
+                error
+            );
+
+
+            return res.status(500).json({
+
+                ok:
+                    false,
+
+                error:
+                    error.message ||
+                    "Instagram download failed."
+            });
+        }
+    }
+);
+
+
+/* =========================================================
+   JOB STATUS API
 ========================================================= */
 
 app.get(
     "/api/status/:jobId",
     (req, res) => {
 
-        const job =
-            jobs.get(
+        const jobId =
+            String(
                 req.params.jobId
             );
+
+
+        const job =
+            jobs.get(
+                jobId
+            );
+
 
         if (!job) {
 
             return res.status(404).json({
-                ok: false,
+
+                ok:
+                    false,
+
                 error:
                     "Download job not found or expired."
             });
-
         }
 
-        res.json({
 
-            ok: true,
+        return res.json({
+
+            ok:
+                true,
 
             jobId:
                 job.id,
@@ -1182,19 +1391,30 @@ app.get(
             message:
                 job.message,
 
+            current:
+                job.current,
+
+            total:
+                job.total,
+
             files:
-                job.files,
+                job.files || [],
+
+            filename:
+                job.filename || null,
+
+            downloadUrl:
+                job.downloadUrl || null,
 
             error:
-                job.error
-
+                job.error || null
         });
-
     }
 );
 
+
 /* =========================================================
-   SERVE FILE
+   FILE DOWNLOAD
 ========================================================= */
 
 app.get(
@@ -1206,11 +1426,13 @@ app.get(
                 req.params.filename
             );
 
+
         const filePath =
             path.join(
                 DOWNLOAD_DIR,
                 filename
             );
+
 
         if (
             !fs.existsSync(
@@ -1221,50 +1443,8 @@ app.get(
             return res.status(404).send(
                 "File not found or expired."
             );
-
         }
 
-        const extension =
-            path.extname(
-                filename
-            ).toLowerCase();
-
-        let contentType =
-            "application/octet-stream";
-
-        if (
-            extension === ".mp4"
-        ) {
-            contentType =
-                "video/mp4";
-        }
-
-        if (
-            extension === ".jpg" ||
-            extension === ".jpeg"
-        ) {
-            contentType =
-                "image/jpeg";
-        }
-
-        if (
-            extension === ".png"
-        ) {
-            contentType =
-                "image/png";
-        }
-
-        if (
-            extension === ".webp"
-        ) {
-            contentType =
-                "image/webp";
-        }
-
-        res.setHeader(
-            "Content-Type",
-            contentType
-        );
 
         res.download(
             filePath,
@@ -1277,14 +1457,12 @@ app.get(
                         "File download error:",
                         error
                     );
-
                 }
-
             }
         );
-
     }
 );
+
 
 /* =========================================================
    FRONTEND
@@ -1316,515 +1494,497 @@ app.get(
 }
 
 body {
-
     margin: 0;
-
     min-height: 100vh;
-
     font-family:
         Inter,
         Arial,
+        Helvetica,
         sans-serif;
 
     background:
         radial-gradient(
-            circle at top left,
-            #39205f 0%,
-            #171525 35%,
-            #080910 75%
+            circle at top,
+            #2b123f 0%,
+            #100b19 40%,
+            #07070b 100%
         );
 
-    color: white;
+    color: #ffffff;
 
     display: flex;
-
     align-items: center;
-
     justify-content: center;
 
-    padding: 24px;
-
+    padding: 25px;
 }
 
 .container {
-
     width: 100%;
-
     max-width: 760px;
-
 }
 
-.brand {
+.card {
+    background: rgba(20, 18, 28, 0.88);
 
-    text-align: center;
+    border:
+        1px solid
+        rgba(255, 255, 255, 0.10);
 
-    margin-bottom: 28px;
+    border-radius: 28px;
 
+    padding: 38px;
+
+    box-shadow:
+        0 30px 90px
+        rgba(0, 0, 0, 0.55);
+
+    backdrop-filter: blur(20px);
 }
 
 .logo {
-
-    width: 74px;
-
-    height: 74px;
-
-    margin: 0 auto 18px;
+    width: 72px;
+    height: 72px;
 
     border-radius: 22px;
 
+    margin: 0 auto 22px;
+
     display: flex;
-
     align-items: center;
-
     justify-content: center;
 
-    font-size: 35px;
+    font-size: 34px;
 
     background:
         linear-gradient(
             135deg,
-            #feda75,
-            #d62976,
-            #962fbf,
-            #4f5bd5
+            #833ab4,
+            #fd1d1d,
+            #fcb045
         );
 
     box-shadow:
-        0 20px 60px rgba(
-            214,
-            41,
-            118,
-            0.28
-        );
-
+        0 15px 40px
+        rgba(253, 29, 29, 0.25);
 }
 
 h1 {
+    text-align: center;
 
-    margin: 0;
+    margin:
+        0 0 10px;
 
-    font-size: 38px;
+    font-size:
+        clamp(30px, 7vw, 52px);
 
-    letter-spacing: -1px;
-
+    letter-spacing:
+        -1.5px;
 }
 
 .subtitle {
+    text-align: center;
 
-    margin-top: 10px;
+    color:
+        #a9a5b4;
 
-    color: #aaaebe;
+    font-size:
+        16px;
 
-    font-size: 15px;
+    margin-bottom:
+        32px;
 
+    line-height:
+        1.6;
 }
 
-.card {
-
-    background:
-        rgba(
-            20,
-            21,
-            31,
-            0.88
-        );
-
-    border:
-        1px solid
-        rgba(
-            255,
-            255,
-            255,
-            0.09
-        );
-
-    border-radius: 28px;
-
-    padding: 28px;
-
-    box-shadow:
-        0 30px 100px
-        rgba(
-            0,
-            0,
-            0,
-            0.45
-        );
-
-    backdrop-filter:
-        blur(20px);
-
-}
-
-.input-wrap {
-
+.input-area {
     display: flex;
 
-    gap: 10px;
+    gap: 12px;
 
-    padding: 7px;
+    background:
+        rgba(255,255,255,0.06);
+
+    padding: 8px;
 
     border-radius: 18px;
 
-    background:
-        #0c0d14;
-
     border:
         1px solid
-        rgba(
-            255,
-            255,
-            255,
-            0.08
-        );
-
+        rgba(255,255,255,0.08);
 }
 
 input {
-
     flex: 1;
 
     min-width: 0;
 
-    border: none;
+    background:
+        transparent;
 
-    outline: none;
+    border: 0;
 
-    background: transparent;
+    outline: 0;
 
-    color: white;
+    color:
+        white;
 
     padding:
         15px 14px;
 
-    font-size: 15px;
-
+    font-size:
+        15px;
 }
 
 input::placeholder {
-    color: #707384;
+    color:
+        #77727f;
 }
 
 button {
-
-    border: none;
+    border: 0;
 
     cursor: pointer;
 
     border-radius: 14px;
 
     padding:
-        0 24px;
+        14px 22px;
 
-    font-weight: 700;
+    font-size:
+        15px;
 
-    color: white;
+    font-weight:
+        700;
+
+    color:
+        white;
 
     background:
         linear-gradient(
             135deg,
-            #d62976,
-            #8e35c7
+            #833ab4,
+            #fd1d1d
         );
 
     transition:
-        transform .2s,
-        opacity .2s;
-
+        transform .2s ease,
+        opacity .2s ease;
 }
 
 button:hover {
-
     transform:
-        translateY(-1px);
-
+        translateY(-2px);
 }
 
 button:disabled {
-
-    opacity: .5;
+    opacity:
+        0.55;
 
     cursor:
         not-allowed;
 
     transform:
         none;
-
 }
 
-.status {
+.progress-box {
+    display:
+        none;
 
-    margin-top: 24px;
+    margin-top:
+        28px;
 
-    display: none;
+    padding:
+        22px;
 
-}
-
-.status.show {
-    display: block;
-}
-
-.status-box {
-
-    padding: 20px;
-
-    border-radius: 18px;
+    border-radius:
+        20px;
 
     background:
-        rgba(
-            255,
-            255,
-            255,
-            0.045
-        );
-
-}
-
-.status-top {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 12px;
-
-    margin-bottom: 15px;
-
-}
-
-.spinner {
-
-    width: 20px;
-
-    height: 20px;
-
-    border-radius: 50%;
+        rgba(255,255,255,0.045);
 
     border:
-        3px solid
-        rgba(
-            255,
-            255,
-            255,
-            0.15
-        );
-
-    border-top-color:
-        #d62976;
-
-    animation:
-        spin .8s linear infinite;
-
+        1px solid
+        rgba(255,255,255,0.07);
 }
 
-@keyframes spin {
+.progress-top {
+    display:
+        flex;
 
-    to {
-        transform:
-            rotate(360deg);
-    }
+    justify-content:
+        space-between;
 
+    gap:
+        15px;
+
+    margin-bottom:
+        12px;
 }
 
-.progress {
+.progress-text {
+    color:
+        #c5c1cc;
 
-    height: 9px;
+    font-size:
+        14px;
+}
+
+.percent {
+    font-weight:
+        800;
+}
+
+.progress-track {
+    height:
+        10px;
+
+    border-radius:
+        999px;
+
+    overflow:
+        hidden;
 
     background:
-        #090a10;
-
-    border-radius: 999px;
-
-    overflow: hidden;
-
+        rgba(255,255,255,0.08);
 }
 
 .progress-bar {
+    width:
+        0%;
 
-    height: 100%;
+    height:
+        100%;
 
-    width: 0%;
-
-    border-radius: inherit;
+    border-radius:
+        inherit;
 
     background:
         linear-gradient(
             90deg,
-            #d62976,
-            #8e35c7,
-            #4f5bd5
+            #833ab4,
+            #fd1d1d,
+            #fcb045
         );
 
     transition:
         width .35s ease;
-
 }
 
-.percent {
+.message {
+    margin-top:
+        13px;
 
-    margin-top: 9px;
+    color:
+        #a9a5b4;
 
-    color: #989bad;
-
-    font-size: 13px;
-
-}
-
-.results {
-
-    margin-top: 15px;
-
-    display: grid;
-
-    gap: 10px;
-
+    font-size:
+        14px;
 }
 
 .result {
+    display:
+        none;
 
-    display: flex;
-
-    align-items: center;
-
-    justify-content: space-between;
-
-    gap: 12px;
-
-    padding: 14px;
-
-    border-radius: 15px;
-
-    background:
-        rgba(
-            255,
-            255,
-            255,
-            0.05
-        );
-
+    margin-top:
+        24px;
 }
 
-.result-name {
+.result-title {
+    font-size:
+        18px;
 
-    overflow: hidden;
+    font-weight:
+        800;
 
-    text-overflow: ellipsis;
-
-    white-space: nowrap;
-
-    color: #dfe1eb;
-
-    font-size: 14px;
-
+    margin-bottom:
+        14px;
 }
 
-.download {
+.file-list {
+    display:
+        flex;
 
-    flex-shrink: 0;
+    flex-direction:
+        column;
 
-    text-decoration: none;
+    gap:
+        10px;
+}
 
-    color: white;
+.file-item {
+    display:
+        flex;
 
-    background:
-        #242637;
+    align-items:
+        center;
+
+    justify-content:
+        space-between;
+
+    gap:
+        15px;
 
     padding:
-        10px 15px;
+        15px;
 
-    border-radius: 11px;
+    border-radius:
+        16px;
 
-    font-size: 13px;
+    background:
+        rgba(255,255,255,0.05);
 
-    font-weight: 700;
+    border:
+        1px solid
+        rgba(255,255,255,0.07);
+}
 
+.file-info {
+    overflow:
+        hidden;
+}
+
+.file-name {
+    font-weight:
+        700;
+
+    overflow:
+        hidden;
+
+    text-overflow:
+        ellipsis;
+
+    white-space:
+        nowrap;
+}
+
+.file-type {
+    color:
+        #8e8996;
+
+    font-size:
+        12px;
+
+    margin-top:
+        4px;
+}
+
+.download-button {
+    flex-shrink:
+        0;
+
+    text-decoration:
+        none;
+
+    display:
+        inline-flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    padding:
+        10px 16px;
+
+    border-radius:
+        12px;
+
+    background:
+        rgba(255,255,255,0.10);
+
+    color:
+        white;
+
+    font-weight:
+        700;
+
+    font-size:
+        13px;
+}
+
+.download-button:hover {
+    background:
+        rgba(255,255,255,0.16);
 }
 
 .error {
-
     color:
-        #ff8e9f;
-
+        #ff7b8b;
 }
 
-.features {
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(3, 1fr);
-
-    gap: 10px;
-
-    margin-top: 16px;
-
-}
-
-.feature {
-
-    padding: 14px;
-
-    border-radius: 15px;
-
-    background:
-        rgba(
-            255,
-            255,
-            255,
-            0.035
-        );
-
-    color: #9da0b2;
-
-    font-size: 12px;
-
-    text-align: center;
-
+.success {
+    color:
+        #72e6a3;
 }
 
 .footer {
+    text-align:
+        center;
 
-    text-align: center;
+    margin-top:
+        24px;
 
-    color: #656878;
+    color:
+        #6f6a76;
 
-    font-size: 12px;
-
-    margin-top: 18px;
-
+    font-size:
+        12px;
 }
 
-@media (
-    max-width: 600px
-) {
+@media (max-width: 600px) {
 
     body {
-        padding: 15px;
-    }
-
-    h1 {
-        font-size: 30px;
+        padding:
+            14px;
     }
 
     .card {
-        padding: 18px;
-        border-radius: 22px;
+        padding:
+            24px 18px;
+
+        border-radius:
+            22px;
     }
 
-    .input-wrap {
-        flex-direction: column;
+    .input-area {
+        flex-direction:
+            column;
+
+        background:
+            transparent;
+
+        border:
+            0;
+
+        padding:
+            0;
+    }
+
+    input {
+        background:
+            rgba(255,255,255,0.06);
+
+        border:
+            1px solid
+            rgba(255,255,255,0.08);
+
+        border-radius:
+            14px;
+
+        padding:
+            16px;
     }
 
     button {
-        height: 50px;
+        width:
+            100%;
     }
 
-    .features {
-        grid-template-columns:
-            1fr;
-    }
-
-    .result {
+    .file-item {
         align-items:
             flex-start;
 
@@ -1832,6 +1992,10 @@ button:disabled {
             column;
     }
 
+    .download-button {
+        width:
+            100%;
+    }
 }
 
 </style>
@@ -1842,161 +2006,326 @@ button:disabled {
 
 <div class="container">
 
-    <div class="brand">
+<div class="card">
 
-        <div class="logo">
-            ◎
-        </div>
+<div class="logo">
+    ◎
+</div>
 
-        <h1>
-            Instagram Downloader
-        </h1>
+<h1>
+    Instagram Downloader
+</h1>
 
-        <div class="subtitle">
-            Download public Instagram media quickly and easily
-        </div>
+<div class="subtitle">
+    Download public Instagram videos, reels and photos in a few clicks.
+</div>
 
-    </div>
+<div class="input-area">
 
-    <div class="card">
+<input
+    id="url"
+    type="url"
+    placeholder="Paste Instagram URL here..."
+    autocomplete="off"
+>
 
-        <div class="input-wrap">
-
-            <input
-                id="url"
-                type="url"
-                autocomplete="off"
-                placeholder="Paste Instagram Reel or Post URL..."
-            >
-
-            <button
-                id="downloadBtn"
-                onclick="startDownload()"
-            >
-                Download
-            </button>
-
-        </div>
-
-        <div
-            id="status"
-            class="status"
-        >
-
-            <div class="status-box">
-
-                <div class="status-top">
-
-                    <div
-                        id="spinner"
-                        class="spinner"
-                    ></div>
-
-                    <div id="message">
-                        Starting...
-                    </div>
-
-                </div>
-
-                <div class="progress">
-
-                    <div
-                        id="progressBar"
-                        class="progress-bar"
-                    ></div>
-
-                </div>
-
-                <div
-                    id="percent"
-                    class="percent"
-                >
-                    0%
-                </div>
-
-                <div
-                    id="results"
-                    class="results"
-                ></div>
-
-            </div>
-
-        </div>
-
-        <div class="features">
-
-            <div class="feature">
-                🎬 Reels
-            </div>
-
-            <div class="feature">
-                🖼️ Photos
-            </div>
-
-            <div class="feature">
-                📦 Multiple Media
-            </div>
-
-        </div>
-
-    </div>
-
-    <div class="footer">
-        Public Instagram content only
-    </div>
+<button
+    id="downloadBtn"
+    onclick="startDownload()"
+>
+    Download
+</button>
 
 </div>
 
+<div
+    id="progressBox"
+    class="progress-box"
+>
+
+<div class="progress-top">
+
+<div
+    id="progressText"
+    class="progress-text"
+>
+    Starting...
+</div>
+
+<div
+    id="percent"
+    class="percent"
+>
+    0%
+</div>
+
+</div>
+
+<div class="progress-track">
+
+<div
+    id="progressBar"
+    class="progress-bar"
+></div>
+
+</div>
+
+<div
+    id="message"
+    class="message"
+>
+    Preparing your download...
+</div>
+
+</div>
+
+<div
+    id="result"
+    class="result"
+>
+
+<div class="result-title">
+    Your files are ready
+</div>
+
+<div
+    id="fileList"
+    class="file-list"
+></div>
+
+</div>
+
+<div class="footer">
+    Personal-use downloader • Files are automatically cleaned up
+</div>
+
+</div>
+
+</div>
+
+
 <script>
 
-const urlInput =
-    document.getElementById(
-        "url"
-    );
+var currentJob = null;
+var polling = false;
 
-const button =
-    document.getElementById(
-        "downloadBtn"
-    );
 
-const statusBox =
-    document.getElementById(
-        "status"
-    );
+function escapeHtml(text) {
 
-const message =
-    document.getElementById(
-        "message"
-    );
+    return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
 
-const progressBar =
-    document.getElementById(
-        "progressBar"
-    );
 
-const percent =
+function setProgress(
+    value,
+    text
+) {
+
+    var safeValue =
+        Math.max(
+            0,
+            Math.min(
+                100,
+                Number(value) || 0
+            )
+        );
+
+
     document.getElementById(
         "percent"
-    );
+    ).textContent =
+        Math.round(
+            safeValue
+        ) + "%";
 
-const results =
+
     document.getElementById(
-        "results"
-    );
+        "progressBar"
+    ).style.width =
+        safeValue + "%";
 
-const spinner =
+
+    if (text) {
+
+        document.getElementById(
+            "progressText"
+        ).textContent =
+            text;
+    }
+}
+
+
+function showError(text) {
+
     document.getElementById(
-        "spinner"
+        "progressBox"
+    ).style.display =
+        "block";
+
+
+    document.getElementById(
+        "message"
+    ).innerHTML =
+        "<span class=\"error\">❌ " +
+        escapeHtml(text) +
+        "</span>";
+}
+
+
+function showSuccess(text) {
+
+    document.getElementById(
+        "message"
+    ).innerHTML =
+        "<span class=\"success\">✓ " +
+        escapeHtml(text) +
+        "</span>";
+}
+
+
+function renderFiles(files) {
+
+    var result =
+        document.getElementById(
+            "result"
+        );
+
+
+    var list =
+        document.getElementById(
+            "fileList"
+        );
+
+
+    list.innerHTML =
+        "";
+
+
+    files.forEach(
+        function(file, index) {
+
+            var item =
+                document.createElement(
+                    "div"
+                );
+
+            item.className =
+                "file-item";
+
+
+            var info =
+                document.createElement(
+                    "div"
+                );
+
+            info.className =
+                "file-info";
+
+
+            var name =
+                document.createElement(
+                    "div"
+                );
+
+            name.className =
+                "file-name";
+
+            name.textContent =
+                file.filename ||
+                "Instagram file " +
+                (index + 1);
+
+
+            var type =
+                document.createElement(
+                    "div"
+                );
+
+            type.className =
+                "file-type";
+
+            type.textContent =
+                file.type === "image"
+                    ? "IMAGE"
+                    : "MP4 VIDEO";
+
+
+            info.appendChild(
+                name
+            );
+
+            info.appendChild(
+                type
+            );
+
+
+            var link =
+                document.createElement(
+                    "a"
+                );
+
+            link.className =
+                "download-button";
+
+            link.href =
+                file.downloadUrl;
+
+            link.download =
+                file.filename ||
+                "instagram-download";
+
+            link.textContent =
+                "Download";
+
+
+            item.appendChild(
+                info
+            );
+
+            item.appendChild(
+                link
+            );
+
+
+            list.appendChild(
+                item
+            );
+        }
     );
 
-/* =========================================================
-   START DOWNLOAD
-========================================================= */
+
+    result.style.display =
+        "block";
+}
+
 
 async function startDownload() {
 
-    const url =
-        urlInput.value.trim();
+    if (polling) {
+        return;
+    }
+
+
+    var input =
+        document.getElementById(
+            "url"
+        );
+
+
+    var button =
+        document.getElementById(
+            "downloadBtn"
+        );
+
+
+    var url =
+        input.value.trim();
+
 
     if (!url) {
 
@@ -2005,36 +2334,52 @@ async function startDownload() {
         );
 
         return;
-
     }
 
-    button.disabled = true;
 
-    statusBox.classList.add(
-        "show"
-    );
+    document.getElementById(
+        "result"
+    ).style.display =
+        "none";
 
-    results.innerHTML = "";
 
-    spinner.style.display =
+    document.getElementById(
+        "fileList"
+    ).innerHTML =
+        "";
+
+
+    document.getElementById(
+        "progressBox"
+    ).style.display =
         "block";
 
-    progressBar.style.width =
-        "0%";
 
-    percent.textContent =
-        "0%";
+    setProgress(
+        0,
+        "Starting..."
+    );
 
-    message.textContent =
-        "Starting download...";
+
+    button.disabled =
+        true;
+
+    button.textContent =
+        "Processing...";
+
+
+    polling =
+        true;
+
 
     try {
 
-        const response =
+        var response =
             await fetch(
                 "/api/download",
                 {
-                    method: "POST",
+                    method:
+                        "POST",
 
                     headers: {
                         "Content-Type":
@@ -2043,95 +2388,134 @@ async function startDownload() {
 
                     body:
                         JSON.stringify({
-                            url
+                            url:
+                                url
                         })
                 }
             );
 
-        const data =
+
+        var data =
             await response.json();
 
-        if (!response.ok) {
+
+        if (
+            !response.ok ||
+            !data.ok
+        ) {
 
             throw new Error(
                 data.error ||
                 "Download could not be started."
             );
-
         }
 
-        await pollJob(
-            data.jobId
-        );
+
+        currentJob =
+            data.jobId;
+
+
+        await pollJob();
+
 
     } catch (error) {
 
         showError(
-            error.message
+            error.message ||
+            "Something went wrong."
         );
+
+    } finally {
+
+        polling =
+            false;
 
         button.disabled =
             false;
 
+        button.textContent =
+            "Download";
     }
-
 }
 
-/* =========================================================
-   POLL JOB
-========================================================= */
 
-async function pollJob(
-    jobId
-) {
+async function pollJob() {
 
-    try {
+    while (
+        currentJob
+    ) {
 
-        const response =
+        var response =
             await fetch(
-                "/api/status/" + encodeURIComponent(jobId)
+                "/api/status/" +
+                encodeURIComponent(
+                    currentJob
+                )
             );
 
-        const data =
+
+        var data =
             await response.json();
 
-        if (!response.ok) {
+
+        if (
+            !response.ok ||
+            !data.ok
+        ) {
 
             throw new Error(
                 data.error ||
-                "Could not read download status."
+                "Unable to check download status."
             );
-
         }
 
-        progressBar.style.width =
-            `${data.progress}%`;
 
-        percent.textContent =
-            `${data.progress}%`;
+        setProgress(
+            data.progress,
+            getStatusText(
+                data.status
+            )
+        );
 
-        message.textContent =
-            data.message ||
-            "Processing...";
+
+        if (
+            data.message
+        ) {
+
+            document.getElementById(
+                "message"
+            ).textContent =
+                data.message;
+        }
+
 
         if (
             data.status ===
             "completed"
         ) {
 
-            spinner.style.display =
-                "none";
+            setProgress(
+                100,
+                "Complete"
+            );
 
-            renderResults(
+
+            showSuccess(
+                "Your download is ready."
+            );
+
+
+            renderFiles(
                 data.files || []
             );
 
-            button.disabled =
-                false;
+
+            currentJob =
+                null;
 
             return;
-
         }
+
 
         if (
             data.status ===
@@ -2143,194 +2527,109 @@ async function pollJob(
                 data.message ||
                 "Instagram download failed."
             );
-
         }
 
-        setTimeout(
-            () => pollJob(jobId),
-            800
+
+        await sleep(
+            900
         );
-
-    } catch (error) {
-
-        showError(
-            error.message
-        );
-
-        button.disabled =
-            false;
-
     }
-
 }
 
-/* =========================================================
-   SHOW RESULTS
-========================================================= */
 
-function renderResults(
-    files
+function getStatusText(
+    status
 ) {
 
-    results.innerHTML = "";
-
-    if (!files.length) {
-
-        showError(
-            "No downloadable media was returned."
-        );
-
-        return;
-
+    if (
+        status ===
+        "queued"
+    ) {
+        return "Queued";
     }
 
-    files.forEach(
-        (file, index) => {
+    if (
+        status ===
+        "fetching"
+    ) {
+        return "Fetching media";
+    }
 
-            const row =
-                document.createElement(
-                    "div"
-                );
+    if (
+        status ===
+        "downloading"
+    ) {
+        return "Downloading";
+    }
 
-            row.className =
-                "result";
+    if (
+        status ===
+        "converting"
+    ) {
+        return "Optimizing video";
+    }
 
-            const name =
-                document.createElement(
-                    "div"
-                );
+    if (
+        status ===
+        "completed"
+    ) {
+        return "Complete";
+    }
 
-            name.className =
-                "result-name";
+    if (
+        status ===
+        "error"
+    ) {
+        return "Error";
+    }
 
-            name.textContent =
-                files.length > 1
-                    ? `${file.type === "image" ? "🖼️" : "🎬"} Media ${index + 1}`
-                    : file.filename;
+    return "Processing";
+}
 
-            const link =
-                document.createElement(
-                    "a"
-                );
 
-            link.className =
-                "download";
+function sleep(
+    milliseconds
+) {
 
-            link.href =
-                file.downloadUrl;
+    return new Promise(
+        function(resolve) {
 
-            link.download =
-                file.filename;
-
-            link.textContent =
-                "⬇ Download";
-
-            row.appendChild(
-                name
+            setTimeout(
+                resolve,
+                milliseconds
             );
-
-            row.appendChild(
-                link
-            );
-
-            results.appendChild(
-                row
-            );
-
         }
     );
-
 }
 
-/* =========================================================
-   ERROR
-========================================================= */
 
-function showError(
-    text
-) {
+document
+    .getElementById("url")
+    .addEventListener(
+        "keydown",
+        function(event) {
 
-    statusBox.classList.add(
-        "show"
-    );
+            if (
+                event.key ===
+                "Enter"
+            ) {
 
-    spinner.style.display =
-        "none";
-
-    message.innerHTML =
-        `<span class="error">❌ ${escapeHtml(text)}</span>`;
-
-    progressBar.style.width =
-        "0%";
-
-    percent.textContent =
-        "";
-
-}
-
-/* =========================================================
-   ESCAPE HTML
-========================================================= */
-
-function escapeHtml(
-    text
-) {
-
-    return String(text)
-        .replace(
-            /&/g,
-            "&amp;"
-        )
-        .replace(
-            /</g,
-            "&lt;"
-        )
-        .replace(
-            />/g,
-            "&gt;"
-        )
-        .replace(
-            /"/g,
-            "&quot;"
-        )
-        .replace(
-            /'/g,
-            "&#039;"
-        );
-
-}
-
-/* =========================================================
-   ENTER KEY
-========================================================= */
-
-urlInput.addEventListener(
-    "keydown",
-    event => {
-
-        if (
-            event.key ===
-            "Enter"
-        ) {
-
-            startDownload();
-
+                startDownload();
+            }
         }
-
-    }
-);
+    );
 
 </script>
 
 </body>
 
 </html>`);
-
     }
 );
 
+
 /* =========================================================
-   START SERVER
+   SERVER
 ========================================================= */
 
 app.listen(
@@ -2344,12 +2643,12 @@ app.listen(
         );
 
         console.log(
-            `Instagram Downloader running on port ${PORT}`
+            "Instagram Downloader running on port " +
+            PORT
         );
 
         console.log(
             "======================================"
         );
-
     }
 );
