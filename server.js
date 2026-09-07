@@ -104,12 +104,11 @@ app.post("/api/download", async (req, res) => {
                 job.directory,
                 "%(title).100s.%(ext)s"
             ),
-            format: "best[ext=mp4]/best",
+            format: "best",
             noPlaylist: true,
             noWarnings: true,
             quiet: true,
             restrictFilenames: true,
-            mergeOutput: "mp4"
         });
 
         const filename = findVideoFile(job.directory);
