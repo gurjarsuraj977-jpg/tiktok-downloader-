@@ -1,23 +1,20 @@
-
 const express = require("express");
 const { TeraBoxApp } = require("@cfbeg/terabox-api");
 
 const app = express();
-
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
 
-// ============================================================
+// =====================================================
 // TeraBox client
-// ============================================================
+// =====================================================
 
 async function createClient() {
-    const ndus =
-        String(
-            process.env.TERABOX_NDUS || ""
-        ).trim();
+    const ndus = String(
+        process.env.TERABOX_NDUS || ""
+    ).trim();
 
     if (!ndus) {
         throw new Error(
@@ -25,19 +22,14 @@ async function createClient() {
         );
     }
 
-    const tb =
-        new TeraBoxApp(
-            ndus,
-            "ndus"
-        );
+    const tb = new TeraBoxApp(
+        ndus,
+        "ndus"
+    );
 
-    const login =
-        await tb.checkLogin();
+    const login = await tb.checkLogin();
 
-    if (
-        !login ||
-        Number(login.errno) !== 0
-    ) {
+    if (!login || Number(login.errno) !== 0) {
         throw new Error(
             "TeraBox session is invalid or expired."
         );
@@ -47,27 +39,25 @@ async function createClient() {
 }
 
 
-// ============================================================
+// =====================================================
 // Helpers
-// ============================================================
+// =====================================================
 
-function extractEntries(response) {
-    const possible =
-        [
-            response?.data?.list,
-            response?.list,
-            response?.data?.records,
-            response?.records,
-            response?.data?.entries,
-            response?.entries
-        ];
+function getList(result) {
+    if (Array.isArray(result?.list)) {
+        return result.list;
+    }
 
-    for (
-        const value of possible
-    ) {
-        if (Array.isArray(value)) {
-            return value;
-        }
+    if (Array.isArray(result?.data?.list)) {
+        return result.data.list;
+    }
+
+    if (Array.isArray(result?.records)) {
+        return result.records;
+    }
+
+    if (Array.isArray(result?.data?.records)) {
+        return result.data.records;
     }
 
     return [];
@@ -75,22 +65,12 @@ function extractEntries(response) {
 
 
 function normalizeFile(file) {
-    const isDir =
-        String(
-            file?.isdir ??
-            file?.is_dir ??
-            file?.category === "folder"
-                ? "1"
-                : "0"
-        ) === "1";
-
     return {
-        fs_id:
-            String(
-                file?.fs_id ||
-                file?.fsId ||
-                ""
-            ),
+        fs_id: String(
+            file?.fs_id ||
+            file?.fsId ||
+            ""
+        ),
 
         filename:
             file?.server_filename ||
@@ -103,24 +83,10 @@ function normalizeFile(file) {
             "",
 
         size:
-            Number(
-                file?.size || 0
-            ),
+            Number(file?.size || 0),
 
-        isdir: isDir,
-
-        category:
-            String(
-                file?.category || ""
-            ),
-
-        mtime:
-            Number(
-                file?.server_mtime ||
-                file?.mtime ||
-                file?.local_mtime ||
-                0
-            ),
+        isdir:
+            String(file?.isdir || "0"),
 
         thumbnail:
             file?.thumbs?.url3 ||
@@ -133,1229 +99,1164 @@ function normalizeFile(file) {
 
 
 function formatBytes(bytes) {
-    const n =
-        Number(bytes) || 0;
-
-    if (n === 0) {
-        return "0 B";
-    }
+    const n = Number(bytes) || 0;
 
     if (n < 1024) {
         return n + " B";
     }
 
-    if (
-        n <
-        1024 * 1024
-    ) {
+    if (n < 1024 * 1024) {
         return (
             n / 1024
-        ).toFixed(1) +
-        " KB";
+        ).toFixed(1) + " KB";
     }
 
-    if (
-        n <
-        1024 * 1024 * 1024
-    ) {
+    if (n < 1024 * 1024 * 1024) {
         return (
             n /
             (1024 * 1024)
-        ).toFixed(1) +
-        " MB";
+        ).toFixed(1) + " MB";
     }
 
     return (
         n /
         (1024 * 1024 * 1024)
-    ).toFixed(1) +
-    " GB";
+    ).toFixed(1) + " GB";
 }
 
 
-// ============================================================
-// Root / Files
-// ============================================================
+// =====================================================
+// Health
+// =====================================================
 
-app.get(
-    "/api/files",
-    async (req, res) => {
-
-        try {
-
-            const rawPath =
-                String(
-                    req.query.path ||
-                    "/"
-                ).trim();
+app.get("/api/health", (req, res) => {
+    res.json({
+        ok: true,
+        service: "TeraBox Downloader",
+        status: "running"
+    });
+});
 
 
-            const remotePath =
-                rawPath.startsWith("/")
-                    ? rawPath
-                    : "/" + rawPath;
+// =====================================================
+// Files
+// =====================================================
 
+app.get("/api/files", async (req, res) => {
+    try {
+        const requestedPath =
+            String(req.query.path || "/").trim();
 
-            const page =
-                Math.max(
-                    1,
-                    Number(
-                        req.query.page || 1
-                    )
-                );
+        const remotePath =
+            requestedPath.startsWith("/")
+                ? requestedPath
+                : "/" + requestedPath;
 
+        const tb = await createClient();
 
-            const tb =
-                await createClient();
+        console.log(
+            "Loading TeraBox directory:",
+            remotePath
+        );
 
-
-            console.log(
-                "Listing TeraBox directory:",
-                remotePath,
-                "page:",
-                page
+        const result =
+            await tb.getRemoteDir(
+                remotePath
             );
 
-
-            const result =
-                await tb.getRemoteDir(
-                    remotePath,
-                    page
-                );
-
-
-            const entries =
-                extractEntries(
-                    result
-                );
-
-
-            const files =
-                entries.map(
-                    normalizeFile
-                );
-
-
-            return res.json({
-
-                ok: true,
-
-                path:
-                    remotePath,
-
-                page,
-
-                files
-
-            });
-
-
-        } catch (error) {
-
-            console.error(
-                "Files error:",
-                error.message
+        const files =
+            getList(result).map(
+                normalizeFile
             );
 
+        return res.json({
+            ok: true,
+            path: remotePath,
+            files
+        });
 
-            return res.status(500).json({
+    } catch (error) {
+        console.error(
+            "Files error:",
+            error.message
+        );
 
+        return res.status(500).json({
+            ok: false,
+            error:
+                error.message ||
+                "Could not load TeraBox files."
+        });
+    }
+});
+
+
+// =====================================================
+// Search
+// =====================================================
+
+app.get("/api/search", async (req, res) => {
+    try {
+        const query =
+            String(req.query.q || "").trim();
+
+        if (!query) {
+            return res.status(400).json({
                 ok: false,
-
                 error:
-                    error.message ||
-                    "Could not load TeraBox files."
-
+                    "Enter a search term."
             });
-
         }
 
+        const tb = await createClient();
+
+        console.log(
+            "Searching TeraBox:",
+            query
+        );
+
+        const result =
+            await tb.search(
+                query,
+                1
+            );
+
+        const files =
+            getList(result).map(
+                normalizeFile
+            );
+
+        return res.json({
+            ok: true,
+            query,
+            files
+        });
+
+    } catch (error) {
+        console.error(
+            "Search error:",
+            error.message
+        );
+
+        return res.status(500).json({
+            ok: false,
+            error:
+                error.message ||
+                "Search failed."
+        });
     }
-);
+});
 
 
-// ============================================================
-// Search
-// ============================================================
+// =====================================================
+// Download
+// =====================================================
 
-app.get(
-    "/api/search",
-    async (req, res) => {
+app.post("/api/download", async (req, res) => {
+    try {
+        const fsIds =
+            Array.isArray(req.body?.fsIds)
+                ? req.body.fsIds
+                : [];
+
+        const ids =
+            fsIds
+                .map(
+                    value =>
+                        Number(value)
+                )
+                .filter(
+                    Number.isFinite
+                );
+
+        if (!ids.length) {
+            return res.status(400).json({
+                ok: false,
+                error:
+                    "No valid file ID."
+            });
+        }
+
+        const tb = await createClient();
+
+        console.log(
+            "Generating download link..."
+        );
+
+        let result;
 
         try {
+            const home =
+                await tb.getHomeInfo();
 
-            const term =
-                String(
-                    req.query.q ||
-                    ""
-                ).trim();
+            const signb =
+                home?.data?.signb ||
+                home?.signb ||
+                "";
 
-
-            if (!term) {
-
-                return res.status(400).json({
-                    ok: false,
-                    error:
-                        "Enter something to search."
-                });
-
+            if (signb) {
+                result =
+                    await tb.download(
+                        ids,
+                        signb
+                    );
+            } else {
+                result =
+                    await tb.download(
+                        ids
+                    );
             }
 
-
-            const page =
-                Math.max(
-                    1,
-                    Number(
-                        req.query.page || 1
-                    )
-                );
-
-
-            const tb =
-                await createClient();
-
-
-            console.log(
-                "Searching TeraBox:",
-                term
-            );
-
-
-            const result =
-                await tb.search(
-                    term,
-                    page
-                );
-
-
-            const entries =
-                extractEntries(
-                    result
-                );
-
-
-            const files =
-                entries.map(
-                    normalizeFile
-                );
-
-
-            return res.json({
-
-                ok: true,
-
-                query:
-                    term,
-
-                page,
-
-                files
-
-            });
-
-
         } catch (error) {
-
-            console.error(
-                "Search error:",
+            console.log(
+                "Primary download call failed:",
                 error.message
             );
 
-
-            return res.status(500).json({
-
-                ok: false,
-
-                error:
-                    error.message ||
-                    "TeraBox search failed."
-
-            });
-
+            result =
+                await tb.download(
+                    ids
+                );
         }
 
-    }
-);
+        if (
+            !result ||
+            Number(result.errno || 0) !== 0
+        ) {
+            throw new Error(
+                result?.errmsg ||
+                "TeraBox could not create a download link."
+            );
+        }
 
-
-// ============================================================
-// Generate download link
-// ============================================================
-
-app.post(
-    "/api/download",
-    async (req, res) => {
-
-        try {
-
-            const fsIds =
-                Array.isArray(
-                    req.body?.fsIds
+        const links =
+            Array.isArray(result?.dlink)
+                ? result.dlink
+                : Array.isArray(
+                    result?.data?.dlink
                 )
-                    ? req.body.fsIds
+                    ? result.data.dlink
                     : [];
 
+        const output =
+            links.map(
+                item => ({
+                    fs_id:
+                        String(
+                            item?.fs_id || ""
+                        ),
 
-            const numericIds =
-                fsIds
-                    .map(
-                        value =>
-                            Number(value)
-                    )
-                    .filter(
-                        Number.isFinite
-                    );
-
-
-            if (!numericIds.length) {
-
-                return res.status(400).json({
-                    ok: false,
-                    error:
-                        "No valid file ID was supplied."
-                });
-
-            }
-
-
-            const tb =
-                await createClient();
-
-
-            console.log(
-                "Generating download link for",
-                numericIds.length,
-                "file(s)."
+                    downloadUrl:
+                        String(
+                            item?.dlink || ""
+                        )
+                })
             );
 
+        return res.json({
+            ok: true,
+            links: output
+        });
 
-            let result;
+    } catch (error) {
+        console.error(
+            "Download error:",
+            error.message
+        );
+
+        return res.status(500).json({
+            ok: false,
+            error:
+                error.message ||
+                "Download failed."
+        });
+    }
+});
 
 
-            /*
-             * Current @cfbeg/terabox-api documents
-             * download(fs_ids, signb).
-             */
+// =====================================================
+// Frontend
+// =====================================================
 
-            try {
+app.get("/", (req, res) => {
+    const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TeraBox Downloader</title>
 
-                const home =
-                    await tb.getHomeInfo();
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: Arial, sans-serif;
+    background: #07101b;
+    color: white;
+    padding: 20px;
+}
+
+.container {
+    max-width: 950px;
+    margin: 0 auto;
+}
+
+.card {
+    background: #111827;
+    border: 1px solid #243041;
+    border-radius: 24px;
+    padding: 28px;
+    box-shadow: 0 25px 70px rgba(0,0,0,.45);
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    margin-bottom: 25px;
+}
+
+.logo {
+    width: 58px;
+    height: 58px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 900;
+    background: linear-gradient(135deg,#2563eb,#06b6d4);
+}
+
+h1 {
+    margin: 0;
+    font-size: 28px;
+}
+
+.subtitle {
+    margin: 4px 0 0;
+    color: #94a3b8;
+    font-size: 13px;
+}
+
+.search {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+input {
+    flex: 1;
+    min-width: 0;
+    padding: 15px;
+    border-radius: 12px;
+    border: 1px solid #334155;
+    background: #09111d;
+    color: white;
+    outline: none;
+}
+
+button {
+    border: 0;
+    border-radius: 12px;
+    padding: 0 20px;
+    background: linear-gradient(135deg,#2563eb,#06b6d4);
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+button:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+}
+
+.toolbar {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.path {
+    color: #94a3b8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.status {
+    min-height: 20px;
+    margin-bottom: 12px;
+    color: #94a3b8;
+    font-size: 13px;
+}
+
+.error {
+    color: #fca5a5;
+}
+
+.success {
+    color: #86efac;
+}
+
+.files {
+    display: grid;
+    gap: 10px;
+}
+
+.file {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    border-radius: 14px;
+    background: #0a1320;
+    border: 1px solid #1e293b;
+}
+
+.icon {
+    width: 46px;
+    height: 46px;
+    border-radius: 12px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #172033;
+    font-size: 19px;
+    flex-shrink: 0;
+}
+
+.info {
+    flex: 1;
+    min-width: 0;
+}
+
+.name {
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.meta {
+    margin-top: 4px;
+    color: #64748b;
+    font-size: 11px;
+}
+
+.action {
+    background: #1e293b;
+    padding: 9px 13px;
+    border-radius: 10px;
+    font-size: 12px;
+}
+
+.empty {
+    text-align: center;
+    padding: 30px;
+    color: #64748b;
+}
+
+@media (max-width: 650px) {
+    .card {
+        padding: 20px 15px;
+    }
+
+    .search {
+        flex-direction: column;
+    }
+
+    button {
+        min-height: 48px;
+    }
+
+    .file {
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+
+    .action {
+        width: 100%;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+<div class="card">
+
+<div class="header">
+<div class="logo">TB</div>
+
+<div>
+<h1>TeraBox Downloader</h1>
+<div class="subtitle">
+Browse and download your TeraBox files
+</div>
+</div>
+</div>
+
+<div class="search">
+
+<input
+    id="searchInput"
+    type="text"
+    placeholder="Search your files..."
+    autocomplete="off"
+>
+
+<button id="searchButton" type="button">
+Search
+</button>
+
+</div>
+
+<div class="toolbar">
+
+<div id="path" class="path">/</div>
+
+<button id="homeButton" type="button">
+My Files
+</button>
+
+</div>
+
+<div id="status" class="status">
+Loading...
+</div>
+
+<div id="files" class="files"></div>
+
+</div>
+</div>
+
+<script>
+(function () {
+
+    const searchInput =
+        document.getElementById("searchInput");
+
+    const searchButton =
+        document.getElementById("searchButton");
+
+    const homeButton =
+        document.getElementById("homeButton");
+
+    const status =
+        document.getElementById("status");
+
+    const filesBox =
+        document.getElementById("files");
+
+    const pathBox =
+        document.getElementById("path");
 
 
-                const signb =
-                    home?.data?.signb ||
-                    home?.signb ||
-                    "";
+    function formatSize(bytes) {
+
+        const n =
+            Number(bytes) || 0;
+
+        if (n < 1024) {
+            return n + " B";
+        }
+
+        if (n < 1024 * 1024) {
+            return (
+                n / 1024
+            ).toFixed(1) + " KB";
+        }
+
+        if (
+            n <
+            1024 * 1024 * 1024
+        ) {
+            return (
+                n /
+                (1024 * 1024)
+            ).toFixed(1) + " MB";
+        }
+
+        return (
+            n /
+            (1024 * 1024 * 1024)
+        ).toFixed(1) + " GB";
+    }
 
 
-                if (!signb) {
-                    throw new Error(
-                        "TeraBox did not provide signb."
+    function show(
+        text,
+        type
+    ) {
+
+        status.textContent =
+            text || "";
+
+        status.className =
+            "status " +
+            (type || "");
+
+    }
+
+
+    function getIcon(
+        file
+    ) {
+
+        if (file.isdir) {
+            return "📁";
+        }
+
+        const name =
+            String(
+                file.filename || ""
+            ).toLowerCase();
+
+        if (
+            /\\.(mp4|mkv|mov|webm|avi)$/.test(
+                name
+            )
+        ) {
+            return "🎬";
+        }
+
+        if (
+            /\\.(jpg|jpeg|png|webp|gif|avif)$/.test(
+                name
+            )
+        ) {
+            return "🖼️";
+        }
+
+        if (
+            /\\.(mp3|wav|m4a|flac)$/.test(
+                name
+            )
+        ) {
+            return "🎵";
+        }
+
+        if (
+            /\\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$/.test(
+                name
+            )
+        ) {
+            return "📄";
+        }
+
+        return "📦";
+    }
+
+
+    function renderFiles(
+        files
+    ) {
+
+        filesBox.innerHTML = "";
+
+        if (!files.length) {
+
+            const empty =
+                document.createElement(
+                    "div"
+                );
+
+            empty.className =
+                "empty";
+
+            empty.textContent =
+                "No files found.";
+
+            filesBox.appendChild(
+                empty
+            );
+
+            return;
+        }
+
+
+        files.forEach(
+            function (file) {
+
+                const row =
+                    document.createElement(
+                        "div"
                     );
+
+                row.className =
+                    "file";
+
+
+                const icon =
+                    document.createElement(
+                        "div"
+                    );
+
+                icon.className =
+                    "icon";
+
+                icon.textContent =
+                    getIcon(file);
+
+
+                const info =
+                    document.createElement(
+                        "div"
+                    );
+
+                info.className =
+                    "info";
+
+
+                const name =
+                    document.createElement(
+                        "div"
+                    );
+
+                name.className =
+                    "name";
+
+                name.textContent =
+                    file.filename ||
+                    "Unnamed";
+
+
+                const meta =
+                    document.createElement(
+                        "div"
+                    );
+
+                meta.className =
+                    "meta";
+
+                meta.textContent =
+                    file.isdir
+                        ? "Folder"
+                        : "File • " +
+                          formatSize(
+                              file.size
+                          );
+
+
+                info.appendChild(
+                    name
+                );
+
+                info.appendChild(
+                    meta
+                );
+
+
+                const action =
+                    document.createElement(
+                        "button"
+                    );
+
+                action.className =
+                    "action";
+
+
+                if (file.isdir) {
+
+                    action.textContent =
+                        "Open";
+
+                    action.addEventListener(
+                        "click",
+                        function () {
+
+                            loadFolder(
+                                file.path ||
+                                "/"
+                            );
+
+                        }
+                    );
+
+                } else {
+
+                    action.textContent =
+                        "Download";
+
+                    action.addEventListener(
+                        "click",
+                        function () {
+
+                            downloadFile(
+                                file
+                            );
+
+                        }
+                    );
+
                 }
 
 
-                result =
-                    await tb.download(
-                        numericIds,
-                        signb
-                    );
-
-
-            } catch (error) {
-
-                console.log(
-                    "Standard download call failed:",
-                    error.message
+                row.appendChild(
+                    icon
                 );
 
+                row.appendChild(
+                    info
+                );
 
-                /*
-                 * Compatibility fallback because our
-                 * earlier Render test proved download(fsIds)
-                 * works on this installed package.
-                 */
+                row.appendChild(
+                    action
+                );
 
-                result =
-                    await tb.download(
-                        numericIds
-                    );
-
-            }
-
-
-            if (
-                !result ||
-                Number(result.errno || 0) !== 0
-            ) {
-
-                throw new Error(
-                    result?.errmsg ||
-                    "TeraBox could not generate a download link."
+                filesBox.appendChild(
+                    row
                 );
 
             }
-
-
-            const links =
-                Array.isArray(
-                    result.dlink
-                )
-                    ? result.dlink
-                    : (
-                        Array.isArray(
-                            result?.data?.dlink
-                        )
-                            ? result.data.dlink
-                            : []
-                    );
-
-
-            const output =
-                links.map(
-                    item => ({
-                        fs_id:
-                            String(
-                                item.fs_id ||
-                                ""
-                            ),
-
-                        downloadUrl:
-                            String(
-                                item.dlink ||
-                                ""
-                            )
-                    })
-                );
-
-
-            return res.json({
-
-                ok: true,
-
-                links:
-                    output
-
-            });
-
-
-        } catch (error) {
-
-            console.error(
-                "Download error:",
-                error.message
-            );
-
-
-            return res.status(500).json({
-
-                ok: false,
-
-                error:
-                    error.message ||
-                    "Could not create download link."
-
-            });
-
-        }
+        );
 
     }
-);
 
 
-// ============================================================
-// Account
-// ============================================================
+    async function loadFolder(
+        folderPath
+    ) {
 
-app.get(
-    "/api/account",
-    async (req, res) => {
+        const path =
+            folderPath || "/";
+
+        pathBox.textContent =
+            path;
+
+        show(
+            "Loading files..."
+        );
+
+        filesBox.innerHTML =
+            "";
+
 
         try {
 
-            const tb =
-                await createClient();
+            const response =
+                await fetch(
+                    "/api/files?path=" +
+                    encodeURIComponent(
+                        path
+                    ),
+                    {
+                        cache:
+                            "no-store"
+                    }
+                );
 
 
-            let user = null;
+            const data =
+                await response.json();
 
-            try {
 
-                user =
-                    await tb.getCurrentUserInfo();
-
-            } catch {
-                // Optional.
+            if (
+                !response.ok ||
+                !data.ok
+            ) {
+                throw new Error(
+                    data.error ||
+                    "Could not load files."
+                );
             }
 
 
-            let quota = null;
-
-            try {
-
-                quota =
-                    await tb.getQuota();
-
-            } catch {
-                // Optional.
-            }
+            renderFiles(
+                Array.isArray(
+                    data.files
+                )
+                    ? data.files
+                    : []
+            );
 
 
-            return res.json({
-
-                ok: true,
-
-                user,
-
-                quota
-
-            });
-
+            show(
+                (
+                    data.files ||
+                    []
+                ).length +
+                " item(s)"
+            );
 
         } catch (error) {
 
-            return res.status(500).json({
-
-                ok: false,
-
-                error:
-                    error.message ||
-                    "Could not load account."
-
-            });
+            show(
+                error.message ||
+                "Could not load files.",
+                "error"
+            );
 
         }
 
     }
-);
 
 
-// ============================================================
-// Health
-// ============================================================
+    async function search() {
 
-app.get(
-    "/api/health",
-    (req, res) => {
+        const query =
+            searchInput.value.trim();
 
-        res.json({
 
-            ok: true,
+        if (!query) {
 
-            service:
-                "TeraBox Downloader",
+            loadFolder(
+                "/"
+            );
 
-            status:
-                "running"
+            return;
+        }
 
-        });
+
+        show(
+            "Searching..."
+        );
+
+        filesBox.innerHTML =
+            "";
+
+
+        try {
+
+            const response =
+                await fetch(
+                    "/api/search?q=" +
+                    encodeURIComponent(
+                        query
+                    ),
+                    {
+                        cache:
+                            "no-store"
+                    }
+                );
+
+
+            const data =
+                await response.json();
+
+
+            if (
+                !response.ok ||
+                !data.ok
+            ) {
+                throw new Error(
+                    data.error ||
+                    "Search failed."
+                );
+            }
+
+
+            pathBox.textContent =
+                "Search: " +
+                query;
+
+
+            renderFiles(
+                Array.isArray(
+                    data.files
+                )
+                    ? data.files
+                    : []
+            );
+
+
+            show(
+                (
+                    data.files ||
+                    []
+                ).length +
+                " result(s)"
+            );
+
+        } catch (error) {
+
+            show(
+                error.message ||
+                "Search failed.",
+                "error"
+            );
+
+        }
 
     }
-);
 
 
-// ============================================================
-// FRONTEND
-// ============================================================
+    async function downloadFile(
+        file
+    ) {
 
-app.get(
-    "/",
-    (req, res) => {
+        show(
+            "Generating download link..."
+        );
 
-        const html = [
-            "<!DOCTYPE html>",
-            "<html lang=\"en\">",
-            "<head>",
 
-            "<meta charset=\"UTF-8\">",
+        try {
 
-            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+            const response =
+                await fetch(
+                    "/api/download",
+                    {
+                        method:
+                            "POST",
 
-            "<title>TeraBox Downloader</title>",
+                        headers: {
+                            "Content-Type":
+                                "application/json"
+                        },
 
-            "<style>",
+                        body:
+                            JSON.stringify({
+                                fsIds: [
+                                    file.fs_id
+                                ]
+                            })
+                    }
+                );
 
-            "*{box-sizing:border-box}",
 
-            "body{",
-            "margin:0;",
-            "min-height:100vh;",
-            "font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;",
-            "background:radial-gradient(circle at top left,#172554 0,transparent 34%),radial-gradient(circle at bottom right,#164e63 0,transparent 34%),#05080d;",
-            "color:#fff;",
-            "padding:20px",
-            "}",
+            const data =
+                await response.json();
 
-            ".container{",
-            "width:100%;",
-            "max-width:1050px;",
-            "margin:0 auto",
-            "}",
 
-            ".card{",
-            "background:rgba(15,23,42,.96);",
-            "border:1px solid rgba(255,255,255,.08);",
-            "border-radius:28px;",
-            "padding:30px;",
-            "box-shadow:0 30px 100px rgba(0,0,0,.5)",
-            "}",
+            if (
+                !response.ok ||
+                !data.ok
+            ) {
+                throw new Error(
+                    data.error ||
+                    "Download link failed."
+                );
+            }
 
-            ".top{",
-            "display:flex;",
-            "align-items:center;",
-            "justify-content:space-between;",
-            "gap:20px;",
-            "margin-bottom:24px",
-            "}",
 
-            ".brand{",
-            "display:flex;",
-            "align-items:center;",
-            "gap:14px",
-            "}",
+            const item =
+                Array.isArray(
+                    data.links
+                )
+                    ? data.links[0]
+                    : null;
 
-            ".logo{",
-            "width:58px;",
-            "height:58px;",
-            "display:flex;",
-            "align-items:center;",
-            "justify-content:center;",
-            "border-radius:17px;",
-            "font-weight:900;",
-            "font-size:20px;",
-            "background:linear-gradient(135deg,#2563eb,#06b6d4)"
-            "}",
 
-            "h1{",
-            "margin:0;",
-            "font-size:28px;",
-            "letter-spacing:-.8px"
-            "}",
+            if (
+                !item ||
+                !item.downloadUrl
+            ) {
+                throw new Error(
+                    "TeraBox returned no download URL."
+                );
+            }
 
-            ".sub{",
-            "margin:4px 0 0;",
-            "font-size:13px;",
-            "color:#64748b"
-            "}",
 
-            ".search{",
-            "display:flex;",
-            "gap:10px;",
-            "margin-bottom:20px"
-            "}",
+            const link =
+                document.createElement(
+                    "a"
+                );
 
-            "input{",
-            "flex:1;",
-            "min-width:0;",
-            "padding:15px 17px;",
-            "border:1px solid #334155;",
-            "border-radius:14px;",
-            "background:#0b1220;",
-            "color:white;",
-            "font-size:14px;",
-            "outline:none"
-            "}",
+            link.href =
+                item.downloadUrl;
 
-            "input:focus{",
-            "border-color:#3b82f6;",
-            "box-shadow:0 0 0 3px rgba(59,130,246,.12)"
-            "}",
+            link.target =
+                "_blank";
 
-            "button{",
-            "border:0;",
-            "border-radius:14px;",
-            "padding:0 20px;",
-            "background:linear-gradient(135deg,#2563eb,#06b6d4);",
-            "color:#fff;",
-            "font-weight:800;",
-            "cursor:pointer"
-            "}",
+            link.rel =
+                "noopener noreferrer";
 
-            "button:disabled{",
-            "opacity:.5;",
-            "cursor:not-allowed"
-            "}",
+            document.body.appendChild(
+                link
+            );
 
-            ".toolbar{",
-            "display:flex;",
-            "align-items:center;",
-            "justify-content:space-between;",
-            "gap:10px;",
-            "margin-bottom:14px"
-            "}",
+            link.click();
 
-            ".path{",
-            "font-size:13px;",
-            "color:#94a3b8;",
-            "overflow:hidden;",
-            "text-overflow:ellipsis;",
-            "white-space:nowrap"
-            "}",
+            link.remove();
 
-            ".small-button{",
-            "padding:9px 13px;",
-            "font-size:12px;",
-            "background:#1e293b"
-            "}",
 
-            ".status{",
-            "min-height:20px;",
-            "margin-bottom:12px;",
-            "font-size:13px;",
-            "color:#94a3b8"
-            "}",
+            show(
+                "Download link opened.",
+                "success"
+            );
 
-            ".error{color:#fca5a5}",
+        } catch (error) {
 
-            ".success{color:#86efac}",
+            show(
+                error.message ||
+                "Download failed.",
+                "error"
+            );
 
-            ".files{",
-            "display:grid;",
-            "gap:10px"
-            "}",
+        }
 
-            ".file{",
-            "display:flex;",
-            "align-items:center;",
-            "gap:14px;",
-            "padding:14px;",
-            "border-radius:16px;",
-            "background:#0b1220;",
-            "border:1px solid rgba(255,255,255,.06)"
-            "}",
-
-            ".icon{",
-            "width:48px;",
-            "height:48px;",
-            "display:flex;",
-            "justify-content:center;",
-            "align-items:center;",
-            "border-radius:13px;",
-            "background:#172033;",
-            "font-size:20px;",
-            "flex-shrink:0"
-            "}",
-
-            ".info{",
-            "min-width:0;",
-            "flex:1"
-            "}",
-
-            ".name{",
-            "font-size:14px;",
-            "font-weight:800;",
-            "white-space:nowrap;",
-            "overflow:hidden;",
-            "text-overflow:ellipsis"
-            "}",
-
-            ".meta{",
-            "font-size:11px;",
-            "color:#64748b;",
-            "margin-top:4px"
-            "}",
-
-            ".actions{",
-            "display:flex;",
-            "gap:8px;",
-            "flex-shrink:0"
-            "}",
-
-            ".action{",
-            "text-decoration:none;",
-            "padding:10px 13px;",
-            "border-radius:10px;",
-            "background:#1e293b;",
-            "color:white;",
-            "font-size:12px;",
-            "font-weight:800"
-            "}",
-
-            ".action:hover{background:#334155}",
-
-            ".empty{",
-            "padding:35px 20px;",
-            "text-align:center;",
-            "color:#64748b"
-            "}",
-
-            ".footer{",
-            "margin-top:20px;",
-            "text-align:center;",
-            "font-size:11px;",
-            "color:#475569"
-            "}",
-
-            "@media(max-width:700px){",
-
-            ".card{padding:20px 16px}",
-
-            ".top{align-items:flex-start}",
-
-            ".search{flex-direction:column}",
-
-            "button{min-height:50px}",
-
-            ".file{align-items:flex-start}",
-
-            ".actions{flex-direction:column}",
-
-            ".action{text-align:center}",
-
-            "}",
-
-            "</style>",
-
-            "</head>",
-
-            "<body>",
-
-            "<div class=\"container\">",
-
-            "<div class=\"card\">",
-
-            "<div class=\"top\">",
-
-            "<div class=\"brand\">",
-
-            "<div class=\"logo\">TB</div>",
-
-            "<div>",
-
-            "<h1>TeraBox Downloader</h1>",
-
-            "<p class=\"sub\">Browse and download files from your TeraBox account</p>",
-
-            "</div>",
-
-            "</div>",
-
-            "</div>",
-
-            "<div class=\"search\">",
-
-            "<input id=\"searchInput\" placeholder=\"Search your TeraBox files...\" autocomplete=\"off\">",
-
-            "<button id=\"searchButton\" type=\"button\">Search</button>",
-
-            "</div>",
-
-            "<div class=\"toolbar\">",
-
-            "<div id=\"path\" class=\"path\">/</div>",
-
-            "<button id=\"homeButton\" class=\"small-button\" type=\"button\">My Files</button>",
-
-            "</div>",
-
-            "<div id=\"status\" class=\"status\">Loading files...</div>",
-
-            "<div id=\"files\" class=\"files\"></div>",
-
-            "<div class=\"footer\">Personal-use downloader</div>",
-
-            "</div>",
-
-            "</div>",
-
-            "<script>",
-
-            "(function(){",
-
-            "const filesBox=document.getElementById('files');",
-
-            "const status=document.getElementById('status');",
-
-            "const pathBox=document.getElementById('path');",
-
-            "const searchInput=document.getElementById('searchInput');",
-
-            "const searchButton=document.getElementById('searchButton');",
-
-            "const homeButton=document.getElementById('homeButton');",
-
-            "let currentPath='/';",
-
-            "",
-
-            "function size(bytes){",
-
-            "const n=Number(bytes)||0;",
-
-            "if(n<1024)return n+' B';",
-
-            "if(n<1024*1024)return(n/1024).toFixed(1)+' KB';",
-
-            "if(n<1024*1024*1024)return(n/(1024*1024)).toFixed(1)+' MB';",
-
-            "return(n/(1024*1024*1024)).toFixed(1)+' GB';",
-
-            "}",
-
-            "",
-
-            "function show(text,type){",
-
-            "status.textContent=text||'';",
-
-            "status.className='status '+(type||'');",
-
-            "}",
-
-            "",
-
-            "function icon(file){",
-
-            "if(file.isdir)return '📁';",
-
-            "const name=(file.filename||'').toLowerCase();",
-
-            "if(/\\.(mp4|mkv|mov|webm|avi)$/.test(name))return '🎬';",
-
-            "if(/\\.(jpg|jpeg|png|webp|gif|avif)$/.test(name))return '🖼️';",
-
-            "if(/\\.(mp3|wav|m4a|flac)$/.test(name))return '🎵';",
-
-            "if(/\\.(pdf|doc|docx|txt|xls|xlsx|ppt|pptx)$/.test(name))return '📄';",
-
-            "return '📦';",
-
-            "}",
-
-            "",
-
-            "function render(files){",
-
-            "filesBox.innerHTML='';",
-
-            "if(!files.length){",
-
-            "const empty=document.createElement('div');",
-
-            "empty.className='empty';",
-
-            "empty.textContent='No files found.';",
-
-            "filesBox.appendChild(empty);",
-
-            "return;",
-
-            "}",
-
-            "",
-
-            "files.forEach(function(file){",
-
-            "const row=document.createElement('div');",
-
-            "row.className='file';",
-
-            "",
-
-            "const iconBox=document.createElement('div');",
-
-            "iconBox.className='icon';",
-
-            "iconBox.textContent=icon(file);",
-
-            "",
-
-            "const info=document.createElement('div');",
-
-            "info.className='info';",
-
-            "",
-
-            "const name=document.createElement('div');",
-
-            "name.className='name';",
-
-            "name.textContent=file.filename||'Unnamed';",
-
-            "",
-
-            "const meta=document.createElement('div');",
-
-            "meta.className='meta';",
-
-            "meta.textContent=file.isdir?'Folder':'File • '+size(file.size);",
-
-            "",
-
-            "info.appendChild(name);",
-
-            "info.appendChild(meta);",
-
-            "",
-
-            "row.appendChild(iconBox);",
-
-            "row.appendChild(info);",
-
-            "",
-
-            "const actions=document.createElement('div');",
-
-            "actions.className='actions';",
-
-            "",
-
-            "if(file.isdir){",
-
-            "const open=document.createElement('button');",
-
-            "open.className='action';",
-
-            "open.textContent='Open';",
-
-            "open.addEventListener('click',function(){loadFolder(file.path||'/');});",
-
-            "actions.appendChild(open);",
-
-            "}else{",
-
-            "const download=document.createElement('button');",
-
-            "download.className='action';",
-
-            "download.textContent='Download';",
-
-            "download.addEventListener('click',function(){downloadFile(file);});",
-
-            "actions.appendChild(download);",
-
-            "}",
-
-            "",
-
-            "row.appendChild(actions);",
-
-            "filesBox.appendChild(row);",
-
-            "});",
-
-            "}",
-
-            "",
-
-            "async function loadFolder(path){",
-
-            "currentPath=path||'/';",
-
-            "pathBox.textContent=currentPath;",
-
-            "show('Loading files...');",
-
-            "filesBox.innerHTML='';",
-
-            "",
-
-            "try{",
-
-            "const response=await fetch('/api/files?path='+encodeURIComponent(currentPath)+'&page=1',{cache:'no-store'});",
-
-            "const data=await response.json();",
-
-            "",
-
-            "if(!response.ok||!data.ok){throw new Error(data.error||'Could not load files.');}",
-
-            "",
-
-            "render(Array.isArray(data.files)?data.files:[]);",
-
-            "show((data.files||[]).length+' item(s)');",
-
-            "}catch(error){",
-
-            "show(error.message||'Could not load files.','error');",
-
-            "}",
-
-            "}",
-
-            "",
-
-            "async function search(){",
-
-            "const q=searchInput.value.trim();",
-
-            "if(!q){",
-
-            "loadFolder('/');",
-
-            "return;",
-
-            "}",
-
-            "",
-
-            "show('Searching...');",
-
-            "filesBox.innerHTML='';",
-
-            "",
-
-            "try{",
-
-            "const response=await fetch('/api/search?q='+encodeURIComponent(q)+'&page=1',{cache:'no-store'});",
-
-            "const data=await response.json();",
-
-            "",
-
-            "if(!response.ok||!data.ok){throw new Error(data.error||'Search failed.');}",
-
-            "",
-
-            "render(Array.isArray(data.files)?data.files:[]);",
-
-            "pathBox.textContent='Search: '+q;",
-
-            "show((data.files||[]).length+' result(s)');",
-
-            "}catch(error){",
-
-            "show(error.message||'Search failed.','error');",
-
-            "}",
-
-            "}",
-
-            "",
-
-            "async function downloadFile(file){",
-
-            "if(!file||!file.fs_id){",
-
-            "show('This file has no valid ID.','error');",
-
-            "return;",
-
-            "}",
-
-            "",
-
-            "show('Generating download link...');",
-
-            "",
-
-            "try{",
-
-            "const response=await fetch('/api/download',{",
-
-            "method:'POST',",
-
-            "headers:{'Content-Type':'application/json'},",
-
-            "body:JSON.stringify({fsIds:[file.fs_id]})",
-
-            "});",
-
-            "",
-
-            "const data=await response.json();",
-
-            "",
-
-            "if(!response.ok||!data.ok){",
-
-            "throw new Error(data.error||'Could not generate download link.');",
-
-            "}",
-
-            "",
-
-            "const item=(data.links||[])[0];",
-
-            "",
-
-            "if(!item||!item.downloadUrl){",
-
-            "throw new Error('TeraBox did not return a download URL.');",
-
-            "}",
-
-            "",
-
-            "const a=document.createElement('a');",
-
-            "a.href=item.downloadUrl;",
-
-            "a.target='_blank';",
-
-            "a.rel='noopener noreferrer';",
-
-            "a.click();",
-
-            "",
-
-            "show('Download link opened.','success');",
-
-            "}catch(error){",
-
-            "show(error.message||'Download failed.','error');",
-
-            "}",
-
-            "}",
-
-            "",
-
-            "searchButton.addEventListener('click',search);",
-
-            "",
-
-            "searchInput.addEventListener('keydown',function(event){",
-
-            "if(event.key==='Enter')search();",
-
-            "});",
-
-            "",
-
-            "homeButton.addEventListener('click',function(){",
-
-            "searchInput.value='';",
-
-            "loadFolder('/');",
-
-            "});",
-
-            "",
-
-            "loadFolder('/');",
-
-            "",
-
-            "})();",
-
-            "</script>",
-
-            "</body>",
-
-            "</html>"
-        ].join("");
-
-        res.send(html);
     }
-);
 
 
-// ============================================================
-// START
-// ============================================================
+    searchButton.addEventListener(
+        "click",
+        search
+    );
+
+
+    homeButton.addEventListener(
+        "click",
+        function () {
+
+            searchInput.value =
+                "";
+
+            loadFolder(
+                "/"
+            );
+
+        }
+    );
+
+
+    searchInput.addEventListener(
+        "keydown",
+        function (event) {
+
+            if (
+                event.key ===
+                "Enter"
+            ) {
+                search();
+            }
+
+        }
+    );
+
+
+    loadFolder(
+        "/"
+    );
+
+})();
+</script>
+
+</body>
+</html>
+`;
+
+    res.send(html);
+});
+
+
+// =====================================================
+// Start
+// =====================================================
 
 app.listen(
     PORT,
     "0.0.0.0",
     () => {
-
         console.log(
             "TeraBox Downloader running on port " +
             PORT
         );
-
     }
 );
