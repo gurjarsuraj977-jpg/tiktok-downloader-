@@ -161,19 +161,39 @@ async function createClient() {
             "ndus"
         );
 
-    const login =
-        await tb.checkLogin();
+const login =
+    await tb.checkLogin();
 
-    if (
-        !login ||
-        Number(login.errno) !== 0
-    ) {
-        throw new Error(
-            "TeraBox session is invalid or expired."
-        );
-    }
+if (
+    !login ||
+    Number(login.errno) !== 0
+) {
+    throw new Error(
+        "TeraBox session is invalid or expired."
+    );
+}
 
-    return tb;
+console.log(
+    "Refreshing TeraBox session data..."
+);
+
+await tb.updateAppData();
+
+console.log(
+    "Session data refreshed."
+);
+
+console.log(
+    "jsToken available:",
+    Boolean(tb.data?.jsToken)
+);
+
+console.log(
+    "pcftoken available:",
+    Boolean(tb.data?.pcftoken)
+);
+
+return tb;
 }
 
 
