@@ -4,14 +4,13 @@
   "description": "Personal-use TikTok downloader",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
     "express": "^5.1.0",
-    "yt-dlp-exec": "^2.3.0"
+    "youtube-dl-exec": "^3.1.15"
   }
 }
