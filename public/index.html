@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="description"
+        content="Personal TikTok video downloader"
+    >
+
+    <title>TikDown — TikTok Downloader</title>
+
+    <link rel="stylesheet" href="/style.css">
+
+</head>
+
+<body>
+
+    <div class="background-glow"></div>
+
+    <main class="page">
+
+        <section class="card">
+
+            <div class="brand">
+
+                <div class="brand-icon">
+                    TT
+                </div>
+
+                <span>
+                    TikDown
+                </span>
+
+            </div>
+
+            <div class="hero">
+
+                <div class="badge">
+                    PERSONAL DOWNLOADER
+                </div>
+
+                <h1>
+                    Download your
+                    <span>TikTok videos.</span>
+                </h1>
+
+                <p>
+                    Paste a public TikTok link below and
+                    download the video directly.
+                </p>
+
+            </div>
+
+            <div class="download-box">
+
+                <div class="input-wrapper">
+
+                    <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                    >
+                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                    </svg>
+
+                    <input
+                        id="urlInput"
+                        type="url"
+                        placeholder="Paste TikTok link here..."
+                        autocomplete="off"
+                    >
+
+                </div>
+
+                <button
+                    id="downloadBtn"
+                    type="button"
+                >
+
+                    <span id="buttonText">
+                        Download
+                    </span>
+
+                    <span
+                        id="spinner"
+                        class="spinner hidden"
+                    ></span>
+
+                </button>
+
+            </div>
+
+            <div
+                id="status"
+                class="status hidden"
+            ></div>
+
+            <div
+                id="result"
+                class="result hidden"
+            >
+
+                <div class="success-icon">
+                    ✓
+                </div>
+
+                <div class="result-info">
+
+                    <strong>
+                        Video ready
+                    </strong>
+
+                    <span id="filename">
+                        Your video is ready to download.
+                    </span>
+
+                </div>
+
+                <a
+                    id="downloadLink"
+                    class="save-button"
+                    href="#"
+                >
+                    Save Video
+                </a>
+
+            </div>
+
+            <div class="notice">
+
+                <span>ⓘ</span>
+
+                <p>
+                    For personal use. Only download videos
+                    you own or are authorized to use.
+                </p>
+
+            </div>
+
+        </section>
+
+        <footer>
+            TikDown • Personal tool
+        </footer>
+
+    </main>
+
+    <script src="/script.js"></script>
+
+</body>
+
+</html>
