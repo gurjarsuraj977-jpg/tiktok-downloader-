@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const https = require("https");
 const http = require("http");
 
-const { TikTok } = require("@satorufx/mediadownloader");
+const { download } = require("@satorufx/mediadownloader");
 
 const app = express();
 
