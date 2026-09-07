@@ -143,19 +143,20 @@ app.post("/api/download", async (req, res) => {
             downloadUrl: `/api/file/${job.id}/${encodeURIComponent(filename)}`
         });
 
-    } catch (error) {
+ } catch (error) {
 
-        console.error("Download error:", error.message);
+    console.error("DOWNLOAD ERROR:", error);
+    console.error("ERROR MESSAGE:", error.message);
+    console.error("ERROR STDERR:", error.stderr);
 
-        cleanupDirectory(job.directory);
+    cleanupDirectory(job.directory);
 
-        return res.status(500).json({
-            ok: false,
-            error:
-                "Unable to process this video. Make sure the TikTok video is publicly accessible and the URL is correct."
-        });
-    }
-});
+    return res.status(500).json({
+        ok: false,
+        error:
+            "Unable to process this video. Make sure the TikTok video is publicly accessible and the URL is correct."
+    });
+}
 
 app.get("/api/file/:jobId/:filename", (req, res) => {
 
