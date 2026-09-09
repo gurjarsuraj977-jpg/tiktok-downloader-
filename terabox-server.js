@@ -1935,7 +1935,37 @@ TeraBox Link Downloader
 // =====================================================
 // Start
 // =====================================================
+const {
+    runShortUrlInfoDiagnostic
+} = require("./diagnostics/shorturlinfo-check");
 
+app.get(
+    "/api/diagnostic-shorturlinfo",
+    async (req, res) => {
+
+        try {
+
+            const result =
+                await runShortUrlInfoDiagnostic();
+
+            return res.json(result);
+
+        } catch (error) {
+
+            console.error(
+                "ShortUrlInfo diagnostic error:",
+                error.message
+            );
+
+            return res.status(500).json({
+                ok: false,
+                error: "Diagnostic failed."
+            });
+
+        }
+
+    }
+);
 app.listen(
     PORT,
     "0.0.0.0",
