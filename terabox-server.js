@@ -1,1355 +1,320 @@
-const express = require("express");
+#!/usr/bin/env node
+/**
+ * diagnostics/verify-terabox.js
+ *
+ * Standalone, read-only diagnostic for the TeraBox public-share resolve flow.
+ * Uses Node's built-in fetch (Node 18+) -- no new dependencies, no
+ * requirements.txt, nothing added to package.json.
+ *
+ * Does NOT modify terabox-server.js or wire into any live route. Run it
+ * manually from the Render Shell tab.
+ *
+ * WHY MULTIPLE CANDIDATE HOSTS FOR share/list:
+ * No verified current source confirms one single fixed host for the
+ * share/list metadata call. Documented example responses (from other
+ * open-source resolvers) consistently show "dm." and "dm-d." style
+ * subdomains as the CDN host for the resolved dlink (file bytes), not
+ * as the metadata
+ * endpoint. Rather than hard-code a guess, this script tries the referer
+ * domain first, then a couple of known candidates, and reports which one
+ * (if any) actually returned errno 0 -- so the choice is based on this
+ * run's evidence, not on an assumption.
+ *
+ * SECURITY:
+ * - Reads the session cookie ONLY from process.env.TERABOX_NDUS.
+ * - Never prints/logs/returns: cookie value, jsToken, bdstoken, dlink
+ *   value, authorization headers, or any signed URL.
+ * - Output is a flat JSON object with only the fields requested.
+ */
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+'use strict';
 
-app.use(express.json());
+const TEST_URL_DEFAULT = 'https://teraboxshare.com/s/1N1_3C7UX3ZxIMjNi_D62Ag';
 
-const RESOLVER_API =
-    "https://terabox-worker.robinkumarshakya103.workers.dev/api";
+const SUPPORTED_DOMAINS = [
+  'teraboxshare.com', 'terabox.com', '1024terabox.com', 'terabox.app',
+  'teraboxlink.com', 'terasharefile.com', 'terafileshare.com',
+  'terasharelink.com',
+];
 
+const SURL_PATTERN = /\/s\/([a-zA-Z0-9_-]+)/;
 
-// =====================================================
-// Helpers
-// =====================================================
+const JSTOKEN_PATTERNS = [
+  /fn%28%22(.*?)%22%29/,
+  /jsToken\s*=\s*"function\(\)\s*\{\s*return\s*"(.*?)"/,
+  /"jsToken"\s*:\s*"(.*?)"/,
+  /%22(.*?)%22/,
+];
+const BDSTOKEN_PATTERN = /"bdstoken"\s*:\s*"(.*?)"/;
 
-function isValidTeraboxUrl(value) {
-    try {
-        const url = new URL(value);
+// Order = try order. '__referer_domain__' = whatever host the share page
+// actually redirected to.
+const CANDIDATE_HOSTS = ['__referer_domain__', 'www.terabox.com', 'dm.terabox.app'];
 
-        const host = url.hostname
-            .toLowerCase()
-            .replace(/^www\./, "");
+const ERRNO_VERIFICATION_REQUIRED = new Set([400141]);
+const ERRNO_LIKELY_SESSION_ISSUE = new Set([-6, -7, 110, 105]);
 
-        const allowedHosts = [
-            "terabox.com",
-            "terabox.app",
-            "teraboxshare.com",
-            "1024terabox.com",
-            "teraboxlink.com",
-            "terasharefile.com",
-            "terafileshare.com",
-            "terasharelink.com"
-        ];
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-        return allowedHosts.some(
-            domain =>
-                host === domain ||
-                host.endsWith("." + domain)
-        );
-
-    } catch {
-        return false;
-    }
+function baseResult() {
+  return {
+    url_accepted: false,
+    extracted_surl: null,
+    final_share_page_url: null,
+    share_page_http_status: null,
+    jstoken_found: false,
+    bdstoken_found: false,
+    share_api_host_used: null,
+    share_api_http_status: null,
+    share_api_errno: null,
+    file_count: null,
+    filename: null,
+    size: null,
+    fs_id: null,
+    dlink_present: false,
+    cookie_configured: false,
+    cookie_usable: null,
+    failure_stage: null,
+    sanitized_error: null,
+  };
 }
 
-
-function formatBytes(bytes) {
-    const n = Number(bytes) || 0;
-
-    if (n <= 0) {
-        return "Unknown size";
-    }
-
-    if (n < 1024) {
-        return n + " B";
-    }
-
-    if (n < 1024 * 1024) {
-        return (
-            n / 1024
-        ).toFixed(1) + " KB";
-    }
-
-    if (n < 1024 * 1024 * 1024) {
-        return (
-            n /
-            (1024 * 1024)
-        ).toFixed(1) + " MB";
-    }
-
-    if (n < 1024 * 1024 * 1024 * 1024) {
-        return (
-            n /
-            (1024 * 1024 * 1024)
-        ).toFixed(2) + " GB";
-    }
-
-    return (
-        n /
-        (1024 * 1024 * 1024 * 1024)
-    ).toFixed(2) + " TB";
+function getNdus() {
+  return (process.env.TERABOX_NDUS || '').trim();
 }
 
-
-function normalizeFile(file) {
-    return {
-        filename:
-            file?.file_name ||
-            file?.filename ||
-            file?.server_filename ||
-            file?.name ||
-            "Unnamed file",
-
-        size:
-            file?.size ||
-            "",
-
-        thumbnail:
-            file?.thumbnail ||
-            file?.thumb ||
-            file?.thumbnail_url ||
-            "",
-
-        downloadUrl:
-            file?.download_url ||
-            file?.download_link ||
-            file?.dlink ||
-            "",
-
-        streamingUrl:
-            file?.streaming_url ||
-            ""
-    };
+function extractSurl(url) {
+  const m = SURL_PATTERN.exec(url);
+  if (!m) return null;
+  const raw = m[1];
+  const stripped = (raw.startsWith('1') && raw.length > 1) ? raw.slice(1) : raw;
+  return { raw, stripped };
 }
 
+function extractTokens(pageHtml) {
+  let jsToken = null;
+  for (const pattern of JSTOKEN_PATTERNS) {
+    const m = pattern.exec(pageHtml);
+    if (m) {
+      try {
+        jsToken = decodeURIComponent(m[1]);
+      } catch (_e) {
+        jsToken = m[1];
+      }
+      break;
+    }
+  }
+  const bdsMatch = BDSTOKEN_PATTERN.exec(pageHtml);
+  return { jsToken, bdsToken: bdsMatch ? bdsMatch[1] : null };
+}
 
-// =====================================================
-// Health
-// =====================================================
+function browserHeaders({ referer, origin, ndus, accept }) {
+  return {
+    'User-Agent': UA,
+    'Accept': accept || 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Origin': origin,
+    'Referer': referer,
+    'Cookie': `ndus=${ndus}`,
+  };
+}
 
-app.get("/api/health", (req, res) => {
-    res.json({
-        ok: true,
-        service: "TeraBox Link Downloader",
-        status: "running"
+async function tryShareList(host, surlVariant, jsToken, referer, origin, ndus) {
+  const params = new URLSearchParams({
+    app_id: '250528',
+    web: '1',
+    channel: 'chunlei',
+    clienttype: '0',
+    jsToken: jsToken || '',
+    shorturl: surlVariant,
+    root: '1',
+  });
+  const apiUrl = `https://${host}/share/list?${params.toString()}`;
+  let resp;
+  try {
+    resp = await fetch(apiUrl, {
+      method: 'GET',
+      headers: browserHeaders({ referer, origin, ndus }),
     });
+  } catch (err) {
+    return { netErr: `network_error:${err.name || 'FetchError'}` };
+  }
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch (_e) {
+    return { status: resp.status, data: null, netErr: 'non_json_response' };
+  }
+  return { status: resp.status, data, netErr: null };
+}
+
+async function run(testUrl) {
+  const r = baseResult();
+  const ndus = getNdus();
+  r.cookie_configured = Boolean(ndus);
+  if (!ndus) {
+    r.failure_stage = 'cookie_missing';
+    r.sanitized_error = 'TERABOX_NDUS is not set in this environment.';
+    return r;
+  }
+
+  const domainOk = SUPPORTED_DOMAINS.some((d) => testUrl.includes(d));
+  r.url_accepted = domainOk;
+  if (!domainOk) {
+    r.failure_stage = 'url_rejected';
+    r.sanitized_error = 'URL domain not in supported TeraBox domain list.';
+    return r;
+  }
+
+  const surlPair = extractSurl(testUrl);
+  if (!surlPair) {
+    r.failure_stage = 'surl_extraction_failed';
+    r.sanitized_error = 'Could not find /s/<id> segment in URL.';
+    return r;
+  }
+  r.extracted_surl = surlPair.stripped;
+
+  let pageResp;
+  try {
+    pageResp = await fetch(testUrl, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: {
+        'User-Agent': UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Cookie': `ndus=${ndus}`,
+      },
+    });
+  } catch (err) {
+    r.failure_stage = 'page_fetch_failed';
+    r.sanitized_error = `Network error fetching share page: ${err.name || 'FetchError'}`;
+    return r;
+  }
+
+  r.final_share_page_url = pageResp.url || testUrl;
+  r.share_page_http_status = pageResp.status;
+
+  if (pageResp.status !== 200) {
+    r.failure_stage = 'page_fetch_failed';
+    r.sanitized_error = `Share page returned HTTP ${pageResp.status}.`;
+    return r;
+  }
+
+  const pageHtml = await pageResp.text();
+  const { jsToken, bdsToken } = extractTokens(pageHtml);
+  r.jstoken_found = Boolean(jsToken);
+  r.bdstoken_found = Boolean(bdsToken);
+
+  if (!jsToken) {
+    r.failure_stage = 'token_extraction_failed';
+    r.cookie_usable = null; // can't tell -- markup may have changed independent of cookie validity
+    r.sanitized_error = 'jsToken not found in share page HTML. Could mean TeraBox ' +
+      'changed page markup, or the page rendered a login/verification wall instead ' +
+      'of the normal share view.';
+    return r;
+  }
+
+  let finalDomain;
+  try {
+    finalDomain = new URL(r.final_share_page_url).hostname;
+  } catch (_e) {
+    finalDomain = 'www.terabox.com';
+  }
+  const origin = `https://${finalDomain}`;
+  const referer = r.final_share_page_url;
+
+  const hostsTried = new Set();
+  for (const placeholder of CANDIDATE_HOSTS) {
+    const host = placeholder === '__referer_domain__' ? finalDomain : placeholder;
+    if (hostsTried.has(host)) continue;
+    hostsTried.add(host);
+
+    for (const candidateSurl of [surlPair.stripped, surlPair.raw]) {
+      const { status, data, netErr } = await tryShareList(
+        host, candidateSurl, jsToken, referer, origin, ndus,
+      );
+      if (netErr) continue;
+
+      r.share_api_host_used = host;
+      r.share_api_http_status = status;
+      if (!data) continue;
+
+      const errno = data.errno;
+      r.share_api_errno = errno;
+
+      if (errno === 0) {
+        const fileList = data.list || [];
+        r.file_count = fileList.length;
+        if (fileList.length > 0) {
+          const first = fileList[0];
+          r.filename = first.server_filename || null;
+          r.size = first.size != null ? Number(first.size) : null;
+          r.fs_id = first.fs_id != null ? String(first.fs_id) : null;
+          r.dlink_present = Boolean(first.dlink);
+        }
+        r.cookie_usable = true;
+        r.failure_stage = null;
+        r.sanitized_error = null;
+        return r;
+      }
+
+      if (ERRNO_VERIFICATION_REQUIRED.has(errno)) {
+        r.failure_stage = 'verification_required';
+        r.sanitized_error = `errno ${errno}: share requires additional verification ` +
+          '(e.g. password), independent of cookie validity.';
+        return r;
+      }
+
+      if (ERRNO_LIKELY_SESSION_ISSUE.has(errno)) {
+        r.failure_stage = 'expired_session';
+        r.cookie_usable = false;
+        r.sanitized_error = `errno ${errno}: response pattern is consistent with an ` +
+          'expired or invalid session cookie (heuristic, not certain).';
+        return r;
+      }
+    }
+  }
+
+  if (r.share_api_http_status === null) {
+    r.failure_stage = 'share_api_failed';
+    r.sanitized_error = 'No candidate host returned a usable HTTP response.';
+  } else {
+    r.failure_stage = 'incorrect_endpoint_or_headers';
+    r.sanitized_error = 'Got HTTP/JSON responses but none matched errno 0 or a ' +
+      'recognized known errno. Endpoint host, params, or headers may not match ' +
+      'the current live API -- see share_api_host_used and share_api_errno.';
+  }
+  return r;
+}
+
+function scrub(result) {
+  const banned = ['ndus', 'jstoken', 'bdstoken', 'authorization', 'signed'];
+  const safe = {};
+  for (const [k, v] of Object.entries(result)) {
+    const lk = k.toLowerCase();
+    if (k === 'dlink_present') {
+      safe[k] = v;
+      continue;
+    }
+    if (banned.some((b) => lk.includes(b))) continue;
+    safe[k] = v;
+  }
+  return safe;
+}
+
+async function main() {
+  const testUrl = process.argv[2] || TEST_URL_DEFAULT;
+  const result = await run(testUrl);
+  process.stdout.write(JSON.stringify(scrub(result), null, 2) + '\n');
+}
+
+main().catch((err) => {
+  // Even the crash path must never leak secrets.
+  process.stdout.write(JSON.stringify({
+    failure_stage: 'unexpected_error',
+    sanitized_error: `Unhandled error: ${err.name || 'Error'}`,
+  }, null, 2) + '\n');
+  process.exitCode = 1;
 });
-
-
-// =====================================================
-// Resolve TeraBox Share Link
-// =====================================================
-
-app.post("/api/resolve", async (req, res) => {
-
-    try {
-
-        const input =
-            String(
-                req.body?.url || ""
-            ).trim();
-
-        if (!input) {
-            return res.status(400).json({
-                ok: false,
-                error:
-                    "Paste a TeraBox share link."
-            });
-        }
-
-
-        if (!isValidTeraboxUrl(input)) {
-            return res.status(400).json({
-                ok: false,
-                error:
-                    "That does not look like a supported TeraBox link."
-            });
-        }
-
-
-        console.log(
-            "Resolving TeraBox link..."
-        );
-
-
-        const apiUrl =
-            RESOLVER_API +
-            "?url=" +
-            encodeURIComponent(input);
-
-
-        const controller =
-            new AbortController();
-
-
-        const timeout =
-            setTimeout(
-                () => controller.abort(),
-                30000
-            );
-
-
-        let response;
-
-        try {
-
-            response =
-                await fetch(
-                    apiUrl,
-                    {
-                        method: "GET",
-                        headers: {
-                            "Accept":
-                                "application/json"
-                        },
-                        signal:
-                            controller.signal
-                    }
-                );
-
-        } finally {
-
-            clearTimeout(
-                timeout
-            );
-
-        }
-
-
-        let data;
-
-        try {
-
-            data =
-                await response.json();
-
-        } catch {
-
-            return res.status(502).json({
-                ok: false,
-                error:
-                    "TeraBox resolver returned an invalid response."
-            });
-
-        }
-
-
-        console.log(
-            "Resolver HTTP status:",
-            response.status
-        );
-
-        console.log(
-            "Resolver success:",
-            data?.success
-        );
-
-
-        if (
-            !response.ok ||
-            data?.success === false
-        ) {
-
-            return res.status(502).json({
-                ok: false,
-                error:
-                    data?.error ||
-                    "Could not resolve this TeraBox link."
-            });
-
-        }
-
-
-        const rawFiles =
-            Array.isArray(data?.files)
-                ? data.files
-                : [];
-
-
-        const files =
-            rawFiles
-                .map(normalizeFile)
-                .filter(
-                    file =>
-                        file.downloadUrl
-                );
-
-
-        if (!files.length) {
-
-            return res.status(404).json({
-                ok: false,
-                error:
-                    "No downloadable files were found in this TeraBox link."
-            });
-
-        }
-
-
-        return res.json({
-            ok: true,
-            sourceUrl: input,
-            files
-        });
-
-
-    } catch (error) {
-
-        console.error(
-            "Resolve error:",
-            error.message
-        );
-
-
-        if (
-            error.name ===
-            "AbortError"
-        ) {
-
-            return res.status(504).json({
-                ok: false,
-                error:
-                    "TeraBox took too long to respond. Try again."
-            });
-
-        }
-
-
-        return res.status(500).json({
-            ok: false,
-            error:
-                error.message ||
-                "Failed to resolve TeraBox link."
-        });
-
-    }
-
-});
-
-
-// =====================================================
-// Frontend
-// =====================================================
-
-app.get("/", (req, res) => {
-
-    const html = `
-
-<!DOCTYPE html>
-
-<html lang="en">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
-/>
-
-<title>TeraBox Link Downloader</title>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-
-    margin: 0;
-
-    min-height: 100vh;
-
-    font-family:
-        Arial,
-        Helvetica,
-        sans-serif;
-
-    background:
-        radial-gradient(
-            circle at top,
-            #172554 0%,
-            #07101b 45%,
-            #020617 100%
-        );
-
-    color: white;
-
-    padding: 20px;
-
-}
-
-.container {
-
-    width: 100%;
-
-    max-width: 900px;
-
-    margin:
-        0 auto;
-
-}
-
-.card {
-
-    background:
-        rgba(
-            15,
-            23,
-            42,
-            .94
-        );
-
-    border:
-        1px solid
-        rgba(
-            148,
-            163,
-            184,
-            .16
-        );
-
-    border-radius: 28px;
-
-    padding: 30px;
-
-    box-shadow:
-        0 30px 80px
-        rgba(
-            0,
-            0,
-            0,
-            .45
-        );
-
-}
-
-.logo {
-
-    width: 64px;
-
-    height: 64px;
-
-    border-radius: 18px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    font-size: 22px;
-
-    font-weight: 900;
-
-    background:
-        linear-gradient(
-            135deg,
-            #2563eb,
-            #06b6d4
-        );
-
-    box-shadow:
-        0 10px 30px
-        rgba(
-            37,
-            99,
-            235,
-            .25
-        );
-
-}
-
-.header {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 16px;
-
-    margin-bottom: 28px;
-
-}
-
-h1 {
-
-    margin: 0;
-
-    font-size: 30px;
-
-}
-
-.subtitle {
-
-    color:
-        #94a3b8;
-
-    margin-top: 5px;
-
-    font-size: 14px;
-
-}
-
-.search-box {
-
-    display: flex;
-
-    gap: 10px;
-
-    margin-bottom: 18px;
-
-}
-
-input {
-
-    flex: 1;
-
-    min-width: 0;
-
-    padding:
-        17px 18px;
-
-    border-radius: 14px;
-
-    border:
-        1px solid
-        #334155;
-
-    background:
-        #08111f;
-
-    color: white;
-
-    outline: none;
-
-    font-size: 14px;
-
-}
-
-input:focus {
-
-    border-color:
-        #38bdf8;
-
-    box-shadow:
-        0 0 0 3px
-        rgba(
-            56,
-            189,
-            248,
-            .08
-        );
-
-}
-
-button {
-
-    border: 0;
-
-    border-radius: 14px;
-
-    padding:
-        0 22px;
-
-    font-size: 14px;
-
-    font-weight: 800;
-
-    color: white;
-
-    background:
-        linear-gradient(
-            135deg,
-            #2563eb,
-            #06b6d4
-        );
-
-    cursor: pointer;
-
-}
-
-button:hover {
-
-    filter:
-        brightness(1.08);
-
-}
-
-button:disabled {
-
-    opacity: .55;
-
-    cursor:
-        not-allowed;
-
-}
-
-.status {
-
-    min-height: 22px;
-
-    color:
-        #94a3b8;
-
-    font-size: 13px;
-
-    margin-bottom: 18px;
-
-}
-
-.status.error {
-
-    color:
-        #fca5a5;
-
-}
-
-.status.success {
-
-    color:
-        #86efac;
-
-}
-
-.files {
-
-    display: grid;
-
-    gap: 12px;
-
-}
-
-.file {
-
-    display: flex;
-
-    gap: 14px;
-
-    align-items: center;
-
-    padding: 15px;
-
-    background:
-        #0b1422;
-
-    border:
-        1px solid
-        #1e293b;
-
-    border-radius: 16px;
-
-}
-
-.thumb {
-
-    width: 82px;
-
-    height: 58px;
-
-    border-radius: 10px;
-
-    background:
-        #172033;
-
-    object-fit: cover;
-
-    flex-shrink: 0;
-
-}
-
-.thumb-placeholder {
-
-    width: 82px;
-
-    height: 58px;
-
-    border-radius: 10px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    background:
-        #172033;
-
-    font-size: 24px;
-
-    flex-shrink: 0;
-
-}
-
-.info {
-
-    flex: 1;
-
-    min-width: 0;
-
-}
-
-.name {
-
-    font-weight: 800;
-
-    word-break:
-        break-word;
-
-}
-
-.meta {
-
-    color:
-        #64748b;
-
-    font-size: 12px;
-
-    margin-top: 6px;
-
-}
-
-.download {
-
-    background:
-        #1e293b;
-
-    border:
-        1px solid
-        #334155;
-
-    padding:
-        10px 14px;
-
-    border-radius: 11px;
-
-    white-space: nowrap;
-
-}
-
-.empty {
-
-    padding: 35px;
-
-    text-align: center;
-
-    color:
-        #64748b;
-
-    border:
-        1px dashed
-        #334155;
-
-    border-radius: 16px;
-
-}
-
-.footer {
-
-    margin-top: 24px;
-
-    text-align: center;
-
-    color:
-        #475569;
-
-    font-size: 11px;
-
-}
-
-@media (
-    max-width: 650px
-) {
-
-    .card {
-
-        padding: 20px 15px;
-
-    }
-
-    .search-box {
-
-        flex-direction:
-            column;
-
-    }
-
-    .search-box button {
-
-        min-height:
-            50px;
-
-    }
-
-    .file {
-
-        align-items:
-            flex-start;
-
-        flex-wrap:
-            wrap;
-
-    }
-
-    .download {
-
-        width: 100%;
-
-    }
-
-    .thumb,
-    .thumb-placeholder {
-
-        width: 70px;
-
-        height: 52px;
-
-    }
-
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<div class="card">
-
-<div class="header">
-
-<div class="logo">
-TB
-</div>
-
-<div>
-
-<h1>
-TeraBox Link Downloader
-</h1>
-
-<div class="subtitle">
-Paste a TeraBox share link and download your files
-</div>
-
-</div>
-
-</div>
-
-
-<div class="search-box">
-
-<input
-    id="urlInput"
-    type="url"
-    placeholder="Paste TeraBox link here..."
-    autocomplete="off"
-/>
-
-<button
-    id="resolveButton"
-    type="button"
->
-Get Download
-</button>
-
-</div>
-
-
-<div
-    id="status"
-    class="status"
->
-Paste a TeraBox share link above.
-</div>
-
-
-<div
-    id="files"
-    class="files"
-></div>
-
-
-<div class="footer">
-TeraBox Link Downloader
-</div>
-
-</div>
-
-</div>
-
-
-<script>
-
-(function () {
-
-    const input =
-        document.getElementById(
-            "urlInput"
-        );
-
-    const button =
-        document.getElementById(
-            "resolveButton"
-        );
-
-    const status =
-        document.getElementById(
-            "status"
-        );
-
-    const filesBox =
-        document.getElementById(
-            "files"
-        );
-
-
-    function formatSize(value) {
-
-        if (
-            typeof value ===
-            "string" &&
-            value.trim()
-        ) {
-
-            return value;
-
-        }
-
-        const bytes =
-            Number(value) || 0;
-
-        if (!bytes) {
-
-            return "Unknown size";
-
-        }
-
-        if (bytes < 1024) {
-
-            return bytes + " B";
-
-        }
-
-        if (
-            bytes <
-            1024 * 1024
-        ) {
-
-            return (
-                bytes / 1024
-            ).toFixed(1) +
-            " KB";
-
-        }
-
-        if (
-            bytes <
-            1024 *
-            1024 *
-            1024
-        ) {
-
-            return (
-                bytes /
-                (1024 * 1024)
-            ).toFixed(1) +
-            " MB";
-
-        }
-
-        return (
-            bytes /
-            (1024 * 1024 * 1024)
-        ).toFixed(2) +
-        " GB";
-
-    }
-
-
-    function setStatus(
-        text,
-        type
-    ) {
-
-        status.textContent =
-            text || "";
-
-        status.className =
-            "status " +
-            (
-                type || ""
-            );
-
-    }
-
-
-    function renderFiles(
-        files
-    ) {
-
-        filesBox.innerHTML =
-            "";
-
-        if (!files.length) {
-
-            filesBox.innerHTML =
-                '<div class="empty">No downloadable files found.</div>';
-
-            return;
-
-        }
-
-
-        files.forEach(
-            function (file) {
-
-                const row =
-                    document.createElement(
-                        "div"
-                    );
-
-                row.className =
-                    "file";
-
-
-                if (
-                    file.thumbnail
-                ) {
-
-                    const image =
-                        document.createElement(
-                            "img"
-                        );
-
-                    image.className =
-                        "thumb";
-
-                    image.src =
-                        file.thumbnail;
-
-                    image.alt =
-                        file.filename;
-
-                    image.loading =
-                        "lazy";
-
-                    image.onerror =
-                        function () {
-
-                            image.replaceWith(
-                                createPlaceholder()
-                            );
-
-                        };
-
-                    row.appendChild(
-                        image
-                    );
-
-                } else {
-
-                    row.appendChild(
-                        createPlaceholder()
-                    );
-
-                }
-
-
-                const info =
-                    document.createElement(
-                        "div"
-                    );
-
-                info.className =
-                    "info";
-
-
-                const name =
-                    document.createElement(
-                        "div"
-                    );
-
-                name.className =
-                    "name";
-
-                name.textContent =
-                    file.filename ||
-                    "Unnamed file";
-
-
-                const meta =
-                    document.createElement(
-                        "div"
-                    );
-
-                meta.className =
-                    "meta";
-
-                meta.textContent =
-                    "File • " +
-                    formatSize(
-                        file.size
-                    );
-
-
-                info.appendChild(
-                    name
-                );
-
-                info.appendChild(
-                    meta
-                );
-
-
-                const download =
-                    document.createElement(
-                        "button"
-                    );
-
-                download.className =
-                    "download";
-
-                download.type =
-                    "button";
-
-                download.textContent =
-                    "Download";
-
-
-                download.addEventListener(
-                    "click",
-                    function () {
-
-                        if (
-                            !file.downloadUrl
-                        ) {
-
-                            setStatus(
-                                "No download link was returned.",
-                                "error"
-                            );
-
-                            return;
-
-                        }
-
-
-                        const a =
-                            document.createElement(
-                                "a"
-                            );
-
-                        a.href =
-                            file.downloadUrl;
-
-                        a.target =
-                            "_blank";
-
-                        a.rel =
-                            "noopener noreferrer";
-
-                        document.body.appendChild(
-                            a
-                        );
-
-                        a.click();
-
-                        a.remove();
-
-                    }
-                );
-
-
-                row.appendChild(
-                    info
-                );
-
-                row.appendChild(
-                    download
-                );
-
-                filesBox.appendChild(
-                    row
-                );
-
-            }
-        );
-
-    }
-
-
-    function createPlaceholder() {
-
-        const div =
-            document.createElement(
-                "div"
-            );
-
-        div.className =
-            "thumb-placeholder";
-
-        div.textContent =
-            "📦";
-
-        return div;
-
-    }
-
-
-    async function resolve() {
-
-        const url =
-            input.value.trim();
-
-
-        if (!url) {
-
-            setStatus(
-                "Paste a TeraBox share link first.",
-                "error"
-            );
-
-            return;
-
-        }
-
-
-        button.disabled =
-            true;
-
-        button.textContent =
-            "Getting Link...";
-
-        filesBox.innerHTML =
-            "";
-
-        setStatus(
-            "Extracting TeraBox files..."
-        );
-
-
-        try {
-
-            const response =
-                await fetch(
-                    "/api/resolve",
-                    {
-                        method:
-                            "POST",
-
-                        headers: {
-                            "Content-Type":
-                                "application/json"
-                        },
-
-                        body:
-                            JSON.stringify({
-                                url
-                            })
-                    }
-                );
-
-
-            const data =
-                await response.json();
-
-
-            if (
-                !response.ok ||
-                !data.ok
-            ) {
-
-                throw new Error(
-                    data.error ||
-                    "Could not process this link."
-                );
-
-            }
-
-
-            renderFiles(
-                Array.isArray(
-                    data.files
-                )
-                    ? data.files
-                    : []
-            );
-
-
-            setStatus(
-                data.files.length +
-                " downloadable file(s) found.",
-                "success"
-            );
-
-
-        } catch (error) {
-
-            setStatus(
-                error.message ||
-                "Something went wrong.",
-                "error"
-            );
-
-        } finally {
-
-            button.disabled =
-                false;
-
-            button.textContent =
-                "Get Download";
-
-        }
-
-    }
-
-
-    button.addEventListener(
-        "click",
-        resolve
-    );
-
-
-    input.addEventListener(
-        "keydown",
-        function (event) {
-
-            if (
-                event.key ===
-                "Enter"
-            ) {
-
-                resolve();
-
-            }
-
-        }
-    );
-
-})();
-
-</script>
-
-</body>
-
-</html>
-
-`;
-
-    res.send(html);
-
-});
-
-
-// =====================================================
-// Start
-// =====================================================
-
-app.listen(
-    PORT,
-    "0.0.0.0",
-    function () {
-
-        console.log(
-            "TeraBox Link Downloader running on port " +
-            PORT
-        );
-
-    }
-);
