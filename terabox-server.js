@@ -317,7 +317,602 @@ app.post("/api/resolve", async (req, res) => {
 
 });
 
+// =====================================================
+// TEMPORARY TERABOX DIAGNOSTIC
+// Browser-accessible diagnostic — REMOVE AFTER TESTING
+// =====================================================
 
+app.get("/api/diagnostic", async (req, res) => {
+
+    const TEST_URL =
+        "https://teraboxshare.com/s/1N1_3C7UX3ZxIMjNi_D62Ag";
+
+    const result = {
+        url_accepted: false,
+        extracted_surl: null,
+        final_share_page_url: null,
+        share_page_http_status: null,
+
+        jstoken_found: false,
+        bdstoken_found: false,
+
+        share_api_host_used: null,
+        share_api_http_status: null,
+        share_api_errno: null,
+
+        file_count: null,
+        filename: null,
+        size: null,
+        fs_id: null,
+        dlink_present: false,
+
+        direct_link_present: false,
+
+        cookie_configured: false,
+        cookie_usable: null,
+
+        failure_stage: null,
+        sanitized_error: null
+    };
+
+    try {
+
+        // -------------------------------------------------
+        // 1. Check environment
+        // -------------------------------------------------
+
+        const ndus =
+            String(
+                process.env.TERABOX_NDUS || ""
+            ).trim();
+
+        result.cookie_configured =
+            Boolean(ndus);
+
+        if (!ndus) {
+
+            result.failure_stage =
+                "cookie_missing";
+
+            result.sanitized_error =
+                "TERABOX_NDUS is not configured.";
+
+            return res.json(result);
+        }
+
+
+        // -------------------------------------------------
+        // 2. Validate URL
+        // -------------------------------------------------
+
+        const originalUrl =
+            new URL(TEST_URL);
+
+        const supportedHosts = [
+            "teraboxshare.com",
+            "terabox.com",
+            "terabox.app",
+            "1024terabox.com"
+        ];
+
+        const originalHost =
+            originalUrl.hostname
+                .toLowerCase()
+                .replace(/^www\./, "");
+
+        result.url_accepted =
+            supportedHosts.includes(
+                originalHost
+            );
+
+        if (!result.url_accepted) {
+
+            result.failure_stage =
+                "url_rejected";
+
+            result.sanitized_error =
+                "Unsupported TeraBox URL.";
+
+            return res.json(result);
+        }
+
+
+        // -------------------------------------------------
+        // 3. Extract /s/ ID
+        // -------------------------------------------------
+
+        const pathMatch =
+            TEST_URL.match(
+                /\/s\/([A-Za-z0-9_-]+)/
+            );
+
+        if (!pathMatch) {
+
+            result.failure_stage =
+                "surl_extraction_failed";
+
+            result.sanitized_error =
+                "Could not extract the share ID.";
+
+            return res.json(result);
+        }
+
+        const rawShareId =
+            pathMatch[1];
+
+        const shorturl =
+            rawShareId.startsWith("1") &&
+            rawShareId.length > 1
+                ? rawShareId.slice(1)
+                : rawShareId;
+
+        result.extracted_surl =
+            shorturl;
+
+
+        // -------------------------------------------------
+        // 4. Browser headers
+        // -------------------------------------------------
+
+        const browserHeaders = {
+            "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/145.0.0.0 Safari/537.36",
+
+            "Accept":
+                "text/html,application/xhtml+xml," +
+                "application/xml;q=0.9,image/avif," +
+                "image/webp,*/*;q=0.8",
+
+            "Accept-Language":
+                "en-US,en;q=0.9",
+
+            "Cookie":
+                `ndus=${ndus}`
+        };
+
+
+        // -------------------------------------------------
+        // 5. Fetch share page
+        // -------------------------------------------------
+
+        let pageResponse =
+            await fetch(
+                TEST_URL,
+                {
+                    method: "GET",
+                    redirect: "follow",
+                    headers: browserHeaders,
+                    signal:
+                        AbortSignal.timeout(
+                            20000
+                        )
+                }
+            );
+
+        // Some current implementations request the final
+        // URL a second time before extracting tokens.
+        if (pageResponse.ok) {
+
+            pageResponse =
+                await fetch(
+                    pageResponse.url,
+                    {
+                        method: "GET",
+                        redirect: "follow",
+                        headers: browserHeaders,
+                        signal:
+                            AbortSignal.timeout(
+                                20000
+                            )
+                    }
+                );
+        }
+
+
+        result.final_share_page_url =
+            pageResponse.url ||
+            TEST_URL;
+
+        result.share_page_http_status =
+            pageResponse.status;
+
+
+        if (!pageResponse.ok) {
+
+            result.failure_stage =
+                "page_fetch_failed";
+
+            result.sanitized_error =
+                `Share page returned HTTP ${pageResponse.status}.`;
+
+            return res.json(result);
+        }
+
+
+        const pageHtml =
+            await pageResponse.text();
+
+
+        // -------------------------------------------------
+        // 6. Extract tokens
+        // -------------------------------------------------
+
+        let jsToken = null;
+
+        const jsPatterns = [
+            /fn%28%22(.*?)%22%29/,
+            /fn\("([^"]+)"\)/,
+            /jsToken\s*=\s*["']([^"']+)["']/,
+            /jsToken["']?\s*:\s*["']([^"']+)["']/,
+            /window\.jsToken\s*=\s*["']([^"']+)["']/
+        ];
+
+        for (
+            const pattern
+            of jsPatterns
+        ) {
+
+            const match =
+                pageHtml.match(
+                    pattern
+                );
+
+            if (
+                match &&
+                match[1]
+            ) {
+
+                try {
+
+                    jsToken =
+                        decodeURIComponent(
+                            match[1]
+                        );
+
+                } catch {
+
+                    jsToken =
+                        match[1];
+
+                }
+
+                break;
+            }
+        }
+
+
+        const bdsMatch =
+            pageHtml.match(
+                /bdstoken["']?\s*[:=]\s*["']([^"']+)["']/
+            );
+
+        result.jstoken_found =
+            Boolean(jsToken);
+
+        result.bdstoken_found =
+            Boolean(bdsMatch);
+
+
+        if (!jsToken) {
+
+            result.failure_stage =
+                "token_extraction_failed";
+
+            result.sanitized_error =
+                "Share page returned successfully, but jsToken could not be extracted.";
+
+            return res.json(result);
+        }
+
+
+        // -------------------------------------------------
+        // 7. Extract current surl from final URL
+        // -------------------------------------------------
+
+        let finalUrl;
+
+        try {
+
+            finalUrl =
+                new URL(
+                    result.final_share_page_url
+                );
+
+        } catch {
+
+            finalUrl =
+                new URL(
+                    "https://www.terabox.app/"
+                );
+        }
+
+
+        const finalSurl =
+            finalUrl.searchParams.get(
+                "surl"
+            ) ||
+            shorturl;
+
+
+        // -------------------------------------------------
+        // 8. Current share/list API
+        // -------------------------------------------------
+
+        const shareApiHost =
+            "www.terabox.app";
+
+        result.share_api_host_used =
+            shareApiHost;
+
+
+        const params =
+            new URLSearchParams({
+                app_id: "250528",
+                web: "1",
+                channel: "0",
+                jsToken: jsToken,
+                page: "1",
+                num: "20",
+                by: "name",
+                order: "asc",
+                site_referer: "",
+                shorturl: finalSurl,
+                root: "1"
+            });
+
+
+        const shareApiUrl =
+            `https://${shareApiHost}/share/list?${params.toString()}`;
+
+
+        const apiResponse =
+            await fetch(
+                shareApiUrl,
+                {
+                    method: "GET",
+
+                    headers: {
+                        ...browserHeaders,
+
+                        "Accept":
+                            "application/json, text/plain, */*",
+
+                        "X-Requested-With":
+                            "XMLHttpRequest",
+
+                        "Origin":
+                            `https://${shareApiHost}`,
+
+                        "Referer":
+                            result.final_share_page_url,
+
+                        "DNT":
+                            "1"
+                    },
+
+                    signal:
+                        AbortSignal.timeout(
+                            20000
+                        )
+                }
+            );
+
+
+        result.share_api_http_status =
+            apiResponse.status;
+
+
+        let apiData;
+
+        try {
+
+            apiData =
+                await apiResponse.json();
+
+        } catch {
+
+            result.failure_stage =
+                "share_api_failed";
+
+            result.sanitized_error =
+                "Share API returned a non-JSON response.";
+
+            return res.json(result);
+        }
+
+
+        result.share_api_errno =
+            apiData?.errno ?? null;
+
+
+        // -------------------------------------------------
+        // 9. Handle API result
+        // -------------------------------------------------
+
+        if (
+            Number(
+                apiData?.errno
+            ) !== 0
+        ) {
+
+            if (
+                Number(
+                    apiData?.errno
+                ) === 400141
+            ) {
+
+                result.failure_stage =
+                    "verification_required";
+
+            } else if (
+                [-6, -7, 110, 105]
+                    .includes(
+                        Number(
+                            apiData?.errno
+                        )
+                    )
+            ) {
+
+                result.failure_stage =
+                    "session_problem";
+
+                result.cookie_usable =
+                    false;
+
+            } else {
+
+                result.failure_stage =
+                    "share_api_failed";
+            }
+
+
+            result.sanitized_error =
+                `TeraBox share API returned errno ${apiData?.errno}.`;
+
+            return res.json(result);
+        }
+
+
+        result.cookie_usable =
+            true;
+
+
+        const files =
+            Array.isArray(
+                apiData?.list
+            )
+                ? apiData.list
+                : [];
+
+
+        result.file_count =
+            files.length;
+
+
+        if (!files.length) {
+
+            result.failure_stage =
+                "no_files";
+
+            result.sanitized_error =
+                "Share API succeeded but returned no files.";
+
+            return res.json(result);
+        }
+
+
+        const firstFile =
+            files[0];
+
+
+        result.filename =
+            firstFile?.server_filename ||
+            firstFile?.filename ||
+            null;
+
+        result.size =
+            firstFile?.size != null
+                ? Number(
+                    firstFile.size
+                )
+                : null;
+
+        result.fs_id =
+            firstFile?.fs_id != null
+                ? String(
+                    firstFile.fs_id
+                )
+                : null;
+
+        result.dlink_present =
+            Boolean(
+                firstFile?.dlink
+            );
+
+
+        // -------------------------------------------------
+        // 10. Test whether dlink redirects to direct file
+        // -------------------------------------------------
+
+        if (
+            firstFile?.dlink
+        ) {
+
+            try {
+
+                const headResponse =
+                    await fetch(
+                        firstFile.dlink,
+                        {
+                            method:
+                                "HEAD",
+
+                            redirect:
+                                "manual",
+
+                            headers:
+                                browserHeaders,
+
+                            signal:
+                                AbortSignal.timeout(
+                                    15000
+                                )
+                        }
+                    );
+
+
+                const location =
+                    headResponse.headers
+                        .get(
+                            "location"
+                        );
+
+
+                result.direct_link_present =
+                    Boolean(
+                        location
+                    );
+
+            } catch {
+
+                result.direct_link_present =
+                    false;
+            }
+        }
+
+
+        result.failure_stage =
+            null;
+
+        result.sanitized_error =
+            null;
+
+        return res.json(result);
+
+
+    } catch (error) {
+
+        console.error(
+            "TeraBox diagnostic error:",
+            error.message
+        );
+
+        result.failure_stage =
+            "unexpected_error";
+
+        result.sanitized_error =
+            error?.name ===
+            "AbortError"
+                ? "TeraBox request timed out."
+                : "Diagnostic request failed.";
+
+        return res.status(500).json(
+            result
+        );
+    }
+});
 // =====================================================
 // Frontend
 // =====================================================
